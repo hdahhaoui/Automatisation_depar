@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Tuple
+from typing import List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -9,13 +9,49 @@ from datetime import datetime, timedelta
 st.set_page_config(page_title="EDT & Listes • Génie Civil", page_icon="🗓️", layout="wide")
 
 BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR.parent / "data" / "processed"  # dossiers générés par build_master.py
-EDT_FILE = DATA_DIR / "EDT_MASTER_S1.xlsx"
-ETU_FILE = DATA_DIR / "ETUDIANTS_MASTER_S1.xlsx"
+DATA_ROOT = BASE_DIR.parent / "data"
+PREFERRED_DATA_DIR = DATA_ROOT / "processed"  # dossiers générés par build_master.py
+EDT_FILENAME = "EDT_MASTER_S1.xlsx"
+ETU_FILENAME = "ETUDIANTS_MASTER_S1.xlsx"
 
 ORDER_JOUR = {"DIMANCHE":0,"LUNDI":1,"MARDI":2,"MERCREDI":3,"JEUDI":4,"VENDREDI":5,"SAMEDI":6}
 
 # --------------- Utils ---------------
+def _locate_data_file(filename: str) -> Tuple[Optional[Path], List[Path]]:
+    """Retourne le premier fichier correspondant trouvé et la liste des dossiers inspectés."""
+    searched_dirs = []
+
+    def _check_dir(directory: Path) -> Optional[Path]:
+        if not directory or not directory.exists() or not directory.is_dir():
+            return None
+        searched_dirs.append(directory)
+        candidate = directory / filename
+        return candidate if candidate.exists() else None
+
+    # 1) dossiers privilégiés
+    for directory in [PREFERRED_DATA_DIR, DATA_ROOT, DATA_ROOT / "raw"]:
+        found = _check_dir(directory)
+        if found:
+            return found, searched_dirs
+
+    # 2) sous-dossiers directs de data/raw (ex: edt/, students/)
+    raw_dir = DATA_ROOT / "raw"
+    if raw_dir.exists():
+        for child in sorted(raw_dir.iterdir(), key=lambda p: p.name.lower()):
+            if child.is_dir():
+                found = _check_dir(child)
+                if found:
+                    return found, searched_dirs
+
+    # 3) recherche exhaustive dans data/
+    if DATA_ROOT.exists():
+        searched_dirs.append(DATA_ROOT)
+        for match in sorted(DATA_ROOT.rglob(filename), key=lambda p: str(p)):
+            return match, searched_dirs
+
+    return None, searched_dirs
+
+
 @st.cache_data
 def load_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
     edt_cols = [
@@ -44,15 +80,28 @@ def load_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
         "N°",
         "Remarque",
     ]
+    edt_path, edt_dirs = _locate_data_file(EDT_FILENAME)
+    etu_path, etu_dirs = _locate_data_file(ETU_FILENAME)
 
-    if not EDT_FILE.exists() or not ETU_FILE.exists():
+    if not edt_path or not etu_path:
+        searched = set(edt_dirs + etu_dirs)
+        if not searched and DATA_ROOT.exists():
+            searched = {DATA_ROOT}
+        pretty_paths = []
+        for p in sorted(searched, key=lambda x: str(x)):
+            try:
+                pretty_paths.append(str(p.relative_to(BASE_DIR.parent)))
+            except ValueError:
+                pretty_paths.append(str(p))
+        searched_msg = ", ".join(pretty_paths) or "data/"
         st.error(
-            "Les fichiers sources sont introuvables. Vérifie que le dossier `data/processed` contient bien les fichiers Excel attendus."
+            "Les fichiers sources sont introuvables. Vérifie que le dossier `data/` contient bien les fichiers Excel attendus ("
+            f"{EDT_FILENAME} & {ETU_FILENAME}).\nDossiers vérifiés : {searched_msg}."
         )
         return pd.DataFrame(columns=edt_cols), pd.DataFrame(columns=etu_cols)
 
-    edt = pd.read_excel(EDT_FILE)
-    etu = pd.read_excel(ETU_FILE)
+    edt = pd.read_excel(edt_path)
+    etu = pd.read_excel(etu_path)
     # nettoyage minimal
     for col in edt_cols:
         if col not in edt.columns:
