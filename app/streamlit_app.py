@@ -406,7 +406,7 @@ else:
         else:
             st.info("Aucune séance à venir avec ces filtres.")
 
-   with tab_where:
+with tab_where:
     st.markdown("#### Où trouver un enseignant aujourd’hui ?")
 
     # Jour courant en FR (LUNDI..DIMANCHE)
