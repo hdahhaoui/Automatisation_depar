@@ -467,55 +467,121 @@ else:
 
     # ------ Où trouver un enseignant ?
     with tab_where:
-        st.markdown("#### Où trouver un enseignant aujourd’hui ?")
-        today = JOURS_FR[now.weekday()]
-        base = edt.copy()
-        base = base[base["Semestre"].astype(str).str.upper() == SEMESTRE]
-        base = base[base["Jour"].astype(str).str.upper() == today]
-        if base.empty:
-            st.info(f"Aucun cours planifié pour **{today.title()}**.")
-        else:
-            base["__start"] = base["Heure début"].map(time_to_minutes)
-            base["__end"]   = base["Heure fin"].map(time_to_minutes)
-            now_min = now.hour*60 + now.minute
+    st.markdown("#### Où trouver un enseignant ?")
 
-            rows = []
-            for ens, g in base.groupby("Enseignant", dropna=True):
-                if ens is None or str(ens).strip() == "":
+    # Option : n'afficher que les cours d'aujourd'hui
+    only_today = st.checkbox("Aujourd’hui uniquement", value=False)
+
+    # Base : tout l’EDT du département en S1
+    base = edt.copy()
+    base = base[base["Semestre"].astype(str).str.upper() == SEMESTRE].copy()
+
+    if base.empty:
+        st.info("Aucun cours dans les données S1.")
+    else:
+        # Normaliser
+        base["Jour"] = base["Jour"].astype(str).str.upper().str.strip()
+        base["__start"] = base["Heure début"].map(time_to_minutes)
+        base["__end"]   = base["Heure fin"].map(time_to_minutes)
+
+        now = datetime.now()
+        today_idx = now.weekday()
+        today_name = ["LUNDI","MARDI","MERCREDI","JEUDI","VENDREDI","SAMEDI","DIMANCHE"][today_idx]
+        now_min = now.hour*60 + now.minute
+
+        def next_occurrence(row):
+            """Retourne (dt_start, is_today, is_now) pour la prochaine occurrence hebdomadaire de ce cours."""
+            py_day = {"LUNDI":0,"MARDI":1,"MERCREDI":2,"JEUDI":3,"VENDREDI":4,"SAMEDI":5,"DIMANCHE":6}
+            d_idx = py_day.get(str(row["Jour"]).upper(), None)
+            if d_idx is None or pd.isna(row["__start"]) or pd.isna(row["__end"]):
+                return None, False, False
+
+            # En cours maintenant ?
+            is_today = (d_idx == today_idx)
+            in_progress = False
+            if is_today and (row["__start"] <= now_min < row["__end"]):
+                dt_start = datetime.combine(now.date(), datetime.min.time()) + timedelta(minutes=int(row["__start"]))
+                return dt_start, True, True
+
+            # Sinon prochaine occurrence (aujourd’hui plus tard ou semaine prochaine)
+            delta = (d_idx - today_idx) % 7
+            dt_day = (now + timedelta(days=delta)).date()
+            dt_start = datetime.combine(dt_day, datetime.min.time()) + timedelta(minutes=int(row["__start"]))
+            if is_today and row["__start"] < now_min:  # déjà passé aujourd’hui → semaine prochaine
+                dt_start = dt_start + timedelta(days=7)
+                is_today = False
+            return dt_start, is_today, False
+
+        rows = []
+        for ens, g in base.groupby("Enseignant", dropna=True):
+            if ens is None or str(ens).strip() == "":
+                continue
+
+            # Calculer prochaine/actuelle occurrence parmi toutes ses séances
+            best = None
+            for _, r in g.iterrows():
+                dt, is_today, is_now = next_occurrence(r)
+                if dt is None: 
                     continue
-                future = g[g["__start"] >= now_min].sort_values("__start")
-                if not future.empty:
-                    r = future.iloc[0]
-                    dtm = minutes_to_dt(now, int(r["__start"]))
-                    statut = f"Dans {human_delta(dtm, now)}"
-                    order = 0  # à venir
-                else:
-                    r = g.sort_values("__start").iloc[-1]
-                    statut = "Terminé"
-                    order = 1  # passé
+                cand = (dt, is_today, is_now, r)
+                if best is None or cand[0] < best[0]:
+                    best = cand
 
-                rows.append({
-                    "Enseignant": ens,
-                    "Heure début": r["Heure début"],
-                    "Heure fin": r["Heure fin"],
-                    "Matière": r["Matière"],
-                    "Type": r["Type"],
-                    "Salle": r["Salle"],
-                    "Groupe": r["Groupe"],
-                    "Spécialité": r.get("Spec2",""),
-                    "Niveau": pretty_level_label(r.get("Spec2",""), r.get("Niv2","")),
-                    "Statut": statut,
-                    "_order": order,
-                })
+            if best is None:
+                continue
 
-            df_where = pd.DataFrame(rows)
-            if q_nom:
-                df_where = df_where[df_where["Enseignant"].str.contains(q_nom, case=False, na=False)]
-            if df_where.empty:
-                st.info("Aucun enseignant ne correspond à ce filtre.")
+            dt, is_today, is_now, r = best
+            # Construire statut texte + ordre de tri
+            if is_now:
+                statut = f"En cours jusqu’à {r['Heure fin']} (Salle {r['Salle']})"
+                order = (0, dt)  # top
+                jour_txt = r["Jour"].title()
+                heure_txt = f"{r['Heure début']}–{r['Heure fin']}"
             else:
-                df_where = df_where.sort_values(by=["_order","Heure début","Enseignant"])
-                st.dataframe(df_where.drop(columns=["_order"]), use_container_width=True, hide_index=True)
+                if is_today:
+                    statut = f"Dans {human_delta(dt, now)}"
+                    jour_txt = "Aujourd’hui"
+                else:
+                    statut = f"Le {r['Jour'].title()} à {r['Heure début']} (dans {human_delta(dt, now)})"
+                    jour_txt = r["Jour"].title()
+                order = (1 if is_today else 2, dt)
+                heure_txt = f"{r['Heure début']}–{r['Heure fin']}"
+
+            rows.append({
+                "Enseignant": ens,
+                "Statut": statut,
+                "Heure": heure_txt,
+                "Jour": jour_txt,
+                "Salle": r["Salle"],
+                "Matière": r["Matière"],
+                "Groupe": r["Groupe"],
+                "Spécialité": r.get("Spec2",""),
+                "Niveau": pretty_level_label(r.get("Spec2",""), r.get("Niv2","")),
+                "_order0": order[0],
+                "_order1": order[1],
+            })
+
+        df_where = pd.DataFrame(rows)
+
+        # Filtre "Aujourd’hui uniquement"
+        if only_today and not df_where.empty:
+            df_where = df_where[df_where["Jour"].isin(["Aujourd’hui", today_name.title()])]
+
+        # Filtre par nom saisi (optionnel)
+        if q_nom and not df_where.empty:
+            df_where = df_where[df_where["Enseignant"].str.contains(q_nom, case=False, na=False)]
+
+        if df_where.empty:
+            msg_day = "aujourd’hui" if only_today else today_name.title()
+            st.info(f"Aucun enseignant à afficher pour **{msg_day}** avec les filtres actuels.")
+        else:
+            df_where = df_where.sort_values(by=["_order0","_order1","Enseignant"])
+            st.dataframe(
+                df_where.drop(columns=["_order0","_order1"]),
+                use_container_width=True,
+                hide_index=True
+            )
+
 
     # ------ Feuille de présence
     with tab_presence:
