@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import List, Optional, Tuple
+import unicodedata
 
 import pandas as pd
 import streamlit as st
@@ -17,16 +18,36 @@ ETU_FILENAME = "ETUDIANTS_MASTER_S1.xlsx"
 ORDER_JOUR = {"DIMANCHE":0,"LUNDI":1,"MARDI":2,"MERCREDI":3,"JEUDI":4,"VENDREDI":5,"SAMEDI":6}
 
 # --------------- Utils ---------------
+def _normalize_filename(name: str) -> str:
+    """Normalise un nom pour des comparaisons tolérantes (espaces/accents/ponctuation)."""
+    normalized = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
+    return (
+        normalized.upper()
+        .replace("_", "")
+        .replace("-", "")
+        .replace(" ", "")
+    )
+
+
 def _locate_data_file(filename: str) -> Tuple[Optional[Path], List[Path]]:
     """Retourne le premier fichier correspondant trouvé et la liste des dossiers inspectés."""
     searched_dirs = []
+    target_norm = _normalize_filename(filename)
 
     def _check_dir(directory: Path) -> Optional[Path]:
         if not directory or not directory.exists() or not directory.is_dir():
             return None
         searched_dirs.append(directory)
+
         candidate = directory / filename
-        return candidate if candidate.exists() else None
+        if candidate.exists():
+            return candidate
+
+        # tolère les variantes de casse ou les noms avec espaces/underscores différents
+        for file in directory.glob("*.xls*"):
+            if _normalize_filename(file.name) == target_norm:
+                return file
+        return None
 
     # 1) dossiers privilégiés
     for directory in [PREFERRED_DATA_DIR, DATA_ROOT, DATA_ROOT / "raw"]:
@@ -46,8 +67,9 @@ def _locate_data_file(filename: str) -> Tuple[Optional[Path], List[Path]]:
     # 3) recherche exhaustive dans data/
     if DATA_ROOT.exists():
         searched_dirs.append(DATA_ROOT)
-        for match in sorted(DATA_ROOT.rglob(filename), key=lambda p: str(p)):
-            return match, searched_dirs
+        for match in sorted(DATA_ROOT.rglob("*.xls*"), key=lambda p: str(p)):
+            if _normalize_filename(match.name) == target_norm:
+                return match, searched_dirs
 
     return None, searched_dirs
 
