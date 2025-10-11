@@ -406,64 +406,69 @@ else:
         else:
             st.info("Aucune séance à venir avec ces filtres.")
 
-    with tab_where:
-        st.markdown("#### Recherche d’enseignant par nom")
+   with tab_where:
+    st.markdown("#### Où trouver un enseignant aujourd’hui ?")
+
+    # Jour courant en FR (LUNDI..DIMANCHE)
+    jours_fr = ["LUNDI","MARDI","MERCREDI","JEUDI","VENDREDI","SAMEDI","DIMANCHE"]
+    now = datetime.now()
+    today = jours_fr[now.weekday()]
+    now_min = now.hour*60 + now.minute
+
+    # On prend TOUT l’EDT du département (S1), pas seulement le couple (spec/niv/groupe)
+    base = edt.copy()
+    base = base[base["Semestre"].astype(str).str.upper() == SEMESTRE]
+    base = base[base["Jour"].astype(str).str.upper() == today]
+    if base.empty:
+        st.info(f"Aucun cours planifié pour **{today.title()}**.")
+    else:
+        base["__start"] = base["Heure début"].map(time_to_minutes)
+        base["__end"]   = base["Heure fin"].map(time_to_minutes)
+
+        rows = []
+        for ens, g in base.groupby("Enseignant", dropna=True):
+            if ens is None or str(ens).strip() == "":
+                continue
+            # prochain créneau aujourd’hui pour cet enseignant
+            future = g[g["__start"] >= now_min].sort_values("__start")
+            if not future.empty:
+                r = future.iloc[0]
+                statut = f"Dans {human_delta(datetime.combine(now.date(), datetime.min.time()) + timedelta(minutes=int(r['__start'])) , now)}"
+            else:
+                # plus de cours à venir aujourd’hui -> prendre le dernier du jour
+                past = g.sort_values("__start")
+                r = past.iloc[-1]
+                statut = "Terminé"
+
+            rows.append({
+                "Enseignant": ens,
+                "Heure début": r["Heure début"],
+                "Heure fin": r["Heure fin"],
+                "Matière": r["Matière"],
+                "Type": r["Type"],
+                "Salle": r["Salle"],
+                "Groupe": r["Groupe"],
+                "Spécialité": r.get("Spec2",""),
+                "Niveau": pretty_level_label(r.get("Spec2",""), r.get("Niv2","")),
+                "Statut": statut,
+            })
+
+        df_where = pd.DataFrame(rows)
+
+        # Filtre par nom saisi (optionnel)
         if q_nom:
-            salles = subgroup_by_spec_level(edt, spec, niv, None)
-            salles = salles[salles["Enseignant"].str.contains(q_nom, case=False, na=False)][
-                ["Jour","Heure début","Heure fin","Salle","Groupe","Matière"]
-            ].sort_values(["Jour","Heure début"])
-            st.dataframe(salles, use_container_width=True, hide_index=True)
-        else:
-            st.info("Saisis un nom dans la barre latérale pour afficher les emplacements.")
+            df_where = df_where[df_where["Enseignant"].str.contains(q_nom, case=False, na=False)]
 
-    with tab_presence:
-        st.markdown("#### Feuille de présence (enseignant)")
+        # tri : d’abord ceux qui ont un cours à venir, par heure, puis les “Terminé”
+        def sort_key(s):
+            # 'Statut' commence par "Dans ..." pour les à-venir
+            return (s["Statut"].startswith("Dans ") == False, s["Heure début"], s["Enseignant"])
+        if not df_where.empty:
+            df_where = df_where.sort_values(by=["Statut","Heure début","Enseignant"],
+                                            key=lambda col: col.map(lambda _: 0) if col.name!="Statut" else None,
+                                            kind="stable")
+        st.dataframe(df_where, use_container_width=True, hide_index=True)
 
-        # Charger la liste
-        etu_g = subgroup_by_spec_level(etu, spec, niv, groupe)[["N°","Matricule","Nom","Prenom","Remarque"]].reset_index(drop=True)
-        if etu_g.empty:
-            st.warning("Pas de liste trouvée pour ce groupe (vérifie 'Groupe' = G11/G12 et 'Semestre' = S1).")
-        else:
-            # Préparer la table dans l'état de session pour pouvoir cocher/décocher tout
-            key_df = f"presence_{spec}_{niv}_{groupe}"
-            if key_df not in st.session_state:
-                df_init = etu_g.copy()
-                df_init["Présent"] = False
-                st.session_state[key_df] = df_init
-
-            colA, colB, colC = st.columns([1,1,2])
-            with colA:
-                if st.button("✔️ Tout cocher", use_container_width=True):
-                    st.session_state[key_df]["Présent"] = True
-            with colB:
-                if st.button("✖️ Tout décocher", use_container_width=True):
-                    st.session_state[key_df]["Présent"] = False
-            with colC:
-                st.caption("Astuce : tu peux cocher/décocher ligne par ligne aussi.")
-
-            edited = st.data_editor(
-                st.session_state[key_df],
-                use_container_width=True,
-                height=460,
-                num_rows="fixed",
-                key=f"editor_{key_df}",
-            )
-            # Synchroniser l'état
-            st.session_state[key_df] = edited
-
-            # Exports
-            c1, c2 = st.columns([1,1])
-            with c1:
-                st.download_button("⬇️ Export présence (CSV)",
-                                   edited.to_csv(index=False).encode("utf-8-sig"),
-                                   file_name=f"presence_{spec}_{niv}_G{groupe}_S1.csv",
-                                   use_container_width=True)
-            with c2:
-                st.download_button("⬇️ Export présence (XLSX)",
-                                   df_to_xlsx_bytes(edited),
-                                   file_name=f"presence_{spec}_{niv}_G{groupe}_S1.xlsx",
-                                   use_container_width=True)
 
 st.divider()
 st.caption("S1 • Spécialité → Niveau → Groupe • Groupes normalisés (G11/G12) • Feuille de présence côté enseignant uniquement.")
