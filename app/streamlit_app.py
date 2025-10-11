@@ -1,8 +1,7 @@
 # =========================
 # app/streamlit_app.py
 # =========================
-# Thème optionnel:
-# Crée un fichier .streamlit/config.toml avec:
+# (Optionnel) Thème sombre : crée .streamlit/config.toml avec :
 # [theme]
 # base="dark"
 # primaryColor="#5eead4"
@@ -13,7 +12,7 @@
 import re
 import glob
 from io import BytesIO
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as dtime
 from pathlib import Path
 
 import pandas as pd
@@ -28,6 +27,7 @@ RAW_STU = str(BASE_DIR / "data" / "raw" / "students")
 SEMESTRE = "S1"
 
 ORDER_JOUR = {"DIMANCHE":0,"LUNDI":1,"MARDI":2,"MERCREDI":3,"JEUDI":4,"VENDREDI":5,"SAMEDI":6}
+JOURS_FR = ["LUNDI","MARDI","MERCREDI","JEUDI","VENDREDI","SAMEDI","DIMANCHE"]
 
 # ---------- UI helpers ----------
 def inject_css():
@@ -73,12 +73,21 @@ def df_to_xlsx_bytes(df):
     return buf.getvalue()
 
 def time_to_minutes(h):
+    """'08h30' -> 510 minutes. Retourne None si invalide."""
     h = str(h).strip().lower().replace(" ", "")
-    if "h" not in h: return None
+    if "h" not in h:
+        return None
     hh, mm = h.split("h")
-    return int(hh or 0)*60 + int(mm or 0)
+    try:
+        return int(hh or 0)*60 + int(mm or 0)
+    except Exception:
+        return None
 
-def human_delta(dt, now):
+def minutes_to_dt(d: datetime, minutes: int) -> datetime:
+    """Combine date (d.date) + minutes to datetime."""
+    return datetime.combine(d.date(), dtime.min) + timedelta(minutes=minutes)
+
+def human_delta(dt: datetime, now: datetime):
     s = int((dt - now).total_seconds())
     d = s // 86400; s %= 86400
     h = s // 3600;  s %= 3600
@@ -89,24 +98,29 @@ def human_delta(dt, now):
     if m: out.append(f"{m}m")
     return " ".join(out) or "0m"
 
-def next_session(now, edt_df):
-    if edt_df.empty: return None
+def next_session(now: datetime, edt_df: pd.DataFrame):
+    """Prochaine séance (toutes semaines) dans la DF fournie."""
+    if edt_df.empty:
+        return None
     py_day = {"LUNDI":0,"MARDI":1,"MERCREDI":2,"JEUDI":3,"VENDREDI":4,"SAMEDI":5,"DIMANCHE":6}
     today_idx = now.weekday()
     rows = []
     for _, r in edt_df.iterrows():
         d_idx = py_day.get(str(r["Jour"]).upper(), None)
-        if d_idx is None: continue
+        if d_idx is None:
+            continue
         delta = (d_idx - today_idx) % 7
         day_date = (now + timedelta(days=delta)).date()
         m = time_to_minutes(r["Heure début"])
-        if m is None: continue
-        dt = datetime.combine(day_date, datetime.min.time()) + timedelta(minutes=m)
+        if m is None:
+            continue
+        dt = datetime.combine(day_date, dtime.min) + timedelta(minutes=m)
         if dt < now:
             dt = dt + timedelta(days=7)
         rows.append((dt, r))
-    if not rows: return None
-    rows.sort(key=lambda x:x[0])
+    if not rows:
+        return None
+    rows.sort(key=lambda x: x[0])
     return rows[0][0], rows[0][1]
 
 # ---------------- Normalisation & classification ----------------
@@ -200,6 +214,57 @@ def pretty_level_label(spec: str, niv: str):
     if spec == "INGENIEUR": return f"INGENIEUR {niv}"
     return niv  # Masters M1/M2
 
+# ---------- Harmonisation colonnes étudiants ----------
+def harmonize_student_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Renomme les colonnes variées vers le schéma standard et scinde 'Nom et Prénom' si besoin."""
+    mapping = {}
+    for c in df.columns:
+        k = str(c).strip().lower()
+
+        # numéro
+        if k in {"n°", "nº", "n", "num", "numero", "numéro", "n°/ordre"}:
+            mapping[c] = "N°"
+        # matricule
+        elif k in {"matricule", "code", "id", "cne", "apogee", "apogée"}:
+            mapping[c] = "Matricule"
+        # nom/prénom
+        elif k in {"nom"}:
+            mapping[c] = "Nom"
+        elif k in {"prenom", "prénom"}:
+            mapping[c] = "Prenom"
+        elif k in {"nom et prénom", "nom et prenom", "nom_prenom", "nom-prenom"}:
+            mapping[c] = "NomPrenom"
+        # remarque
+        elif k.startswith("remarq") or k.startswith("obs"):
+            mapping[c] = "Remarque"
+        # méta
+        elif k.startswith("semestre"):
+            mapping[c] = "Semestre"
+        elif k.startswith("groupe"):
+            mapping[c] = "Groupe"
+        elif k.startswith("spécial") or k.startswith("special"):
+            mapping[c] = "Spécialité"
+        elif k in {"annee", "année", "annee scolaire", "année scolaire"}:
+            mapping[c] = "Annee"
+
+    if mapping:
+        df = df.rename(columns=mapping)
+
+    # scinder NomPrenom si Nom/Prenom absents
+    if "NomPrenom" in df.columns and (("Nom" not in df.columns) or ("Prenom" not in df.columns)):
+        np = df["NomPrenom"].astype(str).str.strip()
+        if "Nom" not in df.columns:
+            df["Nom"] = np.str.split(r"\s+", n=1, expand=True)[0].fillna("")
+        if "Prenom" not in df.columns:
+            part = np.str.split(r"\s+", n=1, expand=True)
+            df["Prenom"] = (part[1] if part.shape[1] > 1 else "").fillna("")
+
+    # nettoyer espaces
+    for col in ["N°","Matricule","Nom","Prenom","Remarque","Semestre","Spécialité","Niveau","Groupe"]:
+        if col in df.columns:
+            df[col] = df[col].astype(str).str.strip()
+    return df
+
 # ---------------- Chargement des données ----------------
 @st.cache_data
 def load_raw_s1():
@@ -230,7 +295,8 @@ def load_raw_s1():
     for f in stu_files:
         try:
             df = read_any(f)
-            df = ensure_cols(df, STU_COLS)
+            df = harmonize_student_columns(df)         # <— harmonisation
+            df = ensure_cols(df, STU_COLS)             # garantit les colonnes
             df["Semestre"] = df["Semestre"].apply(normalize_semestre)
             df["Groupe"]   = df["Groupe"].apply(normalize_groupe)
             sp2, lv2 = [], []
@@ -238,13 +304,15 @@ def load_raw_s1():
                 s2, n2 = classify_spec_level(r.get("Spécialité",""), r.get("Niveau",""))
                 sp2.append(s2); lv2.append(n2)
             df["Spec2"], df["Niv2"] = sp2, lv2
-            # fallback via nom de fichier
+
+            # fallback via nom de fichier si besoin
             if (df["Spec2"] == "").any() or (df["Niv2"] == "").any() or (df["Groupe"] == "").any():
                 s2_f, n2_f, g_f, sem_f = infer_from_filename(f)
                 if s2_f:  df.loc[df["Spec2"]=="", "Spec2"] = s2_f
                 if n2_f:  df.loc[df["Niv2"]=="",  "Niv2"]  = n2_f
                 if g_f:   df.loc[df["Groupe"]=="","Groupe"] = normalize_groupe(g_f)
                 if sem_f: df.loc[df["Semestre"]=="","Semestre"] = sem_f
+
             stu_list.append(df)
         except Exception as e:
             st.warning(f"Liste ignorée: {f} ({e})")
@@ -315,10 +383,9 @@ title_clean = f"{spec} {pretty_level_label(spec, niv)}".strip()
 
 # ---------------- VUE ÉTUDIANT ----------------
 if role == "Étudiant":
-    # Liste d'étudiants SUPPRIMÉE ici (réservée aux enseignants)
+    # Feuille de présence ABSENTE côté étudiant
     header_role("Étudiant", f"{title_clean} • Groupe {groupe}")
 
-    # Préparer la vue EDT une fois
     view = bloc[["Jour","Heure début","Heure fin","Matière","Type","Enseignant","Salle","Fréquence"]]
 
     tab_edt, tab_next = st.tabs(["📅 Mon EDT", "⏭️ Prochaine séance"])
@@ -364,6 +431,7 @@ else:
         ["🗂️ Planning", "⏭️ Prochaine séance", "📍 Où trouver un enseignant ?", "📝 Feuille de présence"]
     )
 
+    # ------ Planning
     with tab_plan:
         st.markdown("#### Planning filtré")
         planning = bloc.copy()
@@ -383,6 +451,7 @@ else:
                                use_container_width=True)
         st.dataframe(plan_view, use_container_width=True, hide_index=True)
 
+    # ------ Prochaine séance
     with tab_next:
         st.markdown("#### Ma prochaine séance")
         planning = bloc  # complet pour la prochaine séance du groupe
@@ -406,69 +475,112 @@ else:
         else:
             st.info("Aucune séance à venir avec ces filtres.")
 
-with tab_where:
-    st.markdown("#### Où trouver un enseignant aujourd’hui ?")
+    # ------ Où trouver un enseignant ?
+    with tab_where:
+        st.markdown("#### Où trouver un enseignant aujourd’hui ?")
+        today = JOURS_FR[now.weekday()]
+        base = edt.copy()
+        base = base[base["Semestre"].astype(str).str.upper() == SEMESTRE]
+        base = base[base["Jour"].astype(str).str.upper() == today]
+        if base.empty:
+            st.info(f"Aucun cours planifié pour **{today.title()}**.")
+        else:
+            base["__start"] = base["Heure début"].map(time_to_minutes)
+            base["__end"]   = base["Heure fin"].map(time_to_minutes)
+            now_min = now.hour*60 + now.minute
 
-    # Jour courant en FR (LUNDI..DIMANCHE)
-    jours_fr = ["LUNDI","MARDI","MERCREDI","JEUDI","VENDREDI","SAMEDI","DIMANCHE"]
-    now = datetime.now()
-    today = jours_fr[now.weekday()]
-    now_min = now.hour*60 + now.minute
+            rows = []
+            for ens, g in base.groupby("Enseignant", dropna=True):
+                if ens is None or str(ens).strip() == "":
+                    continue
+                future = g[g["__start"] >= now_min].sort_values("__start")
+                if not future.empty:
+                    r = future.iloc[0]
+                    dt = minutes_to_dt(now, int(r["__start"]))
+                    statut = f"Dans {human_delta(dt, now)}"
+                    order = 0  # à venir
+                else:
+                    r = g.sort_values("__start").iloc[-1]
+                    statut = "Terminé"
+                    order = 1  # passé
 
-    # On prend TOUT l’EDT du département (S1), pas seulement le couple (spec/niv/groupe)
-    base = edt.copy()
-    base = base[base["Semestre"].astype(str).str.upper() == SEMESTRE]
-    base = base[base["Jour"].astype(str).str.upper() == today]
-    if base.empty:
-        st.info(f"Aucun cours planifié pour **{today.title()}**.")
-    else:
-        base["__start"] = base["Heure début"].map(time_to_minutes)
-        base["__end"]   = base["Heure fin"].map(time_to_minutes)
+                rows.append({
+                    "Enseignant": ens,
+                    "Heure début": r["Heure début"],
+                    "Heure fin": r["Heure fin"],
+                    "Matière": r["Matière"],
+                    "Type": r["Type"],
+                    "Salle": r["Salle"],
+                    "Groupe": r["Groupe"],
+                    "Spécialité": r.get("Spec2",""),
+                    "Niveau": pretty_level_label(r.get("Spec2",""), r.get("Niv2","")),
+                    "Statut": statut,
+                    "_order": order,
+                })
 
-        rows = []
-        for ens, g in base.groupby("Enseignant", dropna=True):
-            if ens is None or str(ens).strip() == "":
-                continue
-            # prochain créneau aujourd’hui pour cet enseignant
-            future = g[g["__start"] >= now_min].sort_values("__start")
-            if not future.empty:
-                r = future.iloc[0]
-                statut = f"Dans {human_delta(datetime.combine(now.date(), datetime.min.time()) + timedelta(minutes=int(r['__start'])) , now)}"
+            df_where = pd.DataFrame(rows)
+            if q_nom:
+                df_where = df_where[df_where["Enseignant"].str.contains(q_nom, case=False, na=False)]
+            if df_where.empty:
+                st.info("Aucun enseignant ne correspond à ce filtre.")
             else:
-                # plus de cours à venir aujourd’hui -> prendre le dernier du jour
-                past = g.sort_values("__start")
-                r = past.iloc[-1]
-                statut = "Terminé"
+                df_where = df_where.sort_values(by=["_order","Heure début","Enseignant"])
+                st.dataframe(df_where.drop(columns=["_order"]), use_container_width=True, hide_index=True)
 
-            rows.append({
-                "Enseignant": ens,
-                "Heure début": r["Heure début"],
-                "Heure fin": r["Heure fin"],
-                "Matière": r["Matière"],
-                "Type": r["Type"],
-                "Salle": r["Salle"],
-                "Groupe": r["Groupe"],
-                "Spécialité": r.get("Spec2",""),
-                "Niveau": pretty_level_label(r.get("Spec2",""), r.get("Niv2","")),
-                "Statut": statut,
-            })
+    # ------ Feuille de présence
+    with tab_presence:
+        st.markdown("#### Feuille de présence (enseignant)")
 
-        df_where = pd.DataFrame(rows)
+        # Charger la liste (tolérant aux colonnes manquantes)
+        etu_g_raw = subgroup_by_spec_level(etu, spec, niv, groupe).copy()
 
-        # Filtre par nom saisi (optionnel)
-        if q_nom:
-            df_where = df_where[df_where["Enseignant"].str.contains(q_nom, case=False, na=False)]
+        base_cols = [c for c in ["N°","Matricule","Nom","Prenom","Remarque"] if c in etu_g_raw.columns]
+        if not base_cols:
+            # fallback minimal (afficher ce qu'on a)
+            base_cols = [c for c in etu_g_raw.columns if c not in {"Spec2","Niv2","Semestre"}][:5]
 
-        # tri : d’abord ceux qui ont un cours à venir, par heure, puis les “Terminé”
-        def sort_key(s):
-            # 'Statut' commence par "Dans ..." pour les à-venir
-            return (s["Statut"].startswith("Dans ") == False, s["Heure début"], s["Enseignant"])
-        if not df_where.empty:
-            df_where = df_where.sort_values(by=["Statut","Heure début","Enseignant"],
-                                            key=lambda col: col.map(lambda _: 0) if col.name!="Statut" else None,
-                                            kind="stable")
-        st.dataframe(df_where, use_container_width=True, hide_index=True)
+        etu_g = etu_g_raw[base_cols].reset_index(drop=True)
 
+        if etu_g.empty:
+            st.warning("Pas de liste trouvée pour ce groupe (vérifie 'Groupe' = G11/G12 et 'Semestre' = S1).")
+        else:
+            key_df = f"presence_{spec}_{niv}_{groupe}"
+            if key_df not in st.session_state:
+                df_init = etu_g.copy()
+                if "Présent" not in df_init.columns:
+                    df_init["Présent"] = False
+                st.session_state[key_df] = df_init
+
+            colA, colB, colC = st.columns([1,1,2])
+            with colA:
+                if st.button("✔️ Tout cocher", use_container_width=True):
+                    st.session_state[key_df]["Présent"] = True
+            with colB:
+                if st.button("✖️ Tout décocher", use_container_width=True):
+                    st.session_state[key_df]["Présent"] = False
+            with colC:
+                st.caption("Astuce : tu peux cocher/décocher ligne par ligne.")
+
+            edited = st.data_editor(
+                st.session_state[key_df],
+                use_container_width=True,
+                height=460,
+                num_rows="fixed",
+                key=f"editor_{key_df}",
+            )
+            st.session_state[key_df] = edited
+
+            c1, c2 = st.columns([1,1])
+            with c1:
+                st.download_button("⬇️ Export présence (CSV)",
+                                   edited.to_csv(index=False).encode("utf-8-sig"),
+                                   file_name=f"presence_{spec}_{niv}_G{groupe}_S1.csv",
+                                   use_container_width=True)
+            with c2:
+                st.download_button("⬇️ Export présence (XLSX)",
+                                   df_to_xlsx_bytes(edited),
+                                   file_name=f"presence_{spec}_{niv}_G{groupe}_S1.xlsx",
+                                   use_container_width=True)
 
 st.divider()
-st.caption("S1 • Spécialité → Niveau → Groupe • Groupes normalisés (G11/G12) • Feuille de présence côté enseignant uniquement.")
+st.caption("S1 • Spécialité → Niveau → Groupe • Groupes normalisés (G11/G12) • Harmonisation listes étudiants • Feuille de présence côté enseignant uniquement.")
