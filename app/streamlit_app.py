@@ -1,32 +1,26 @@
-# app/streamlit_app.py
 import time
-from io import BytesIO
-from datetime import datetime, timedelta
-
 import pandas as pd
 import streamlit as st
+from datetime import datetime, timedelta
 
 # ---------------- Config ----------------
 st.set_page_config(page_title="EDT & Listes • Génie Civil", page_icon="🗓️", layout="wide")
 
 DATA_DIR = "data/processed"          # dossiers générés par build_master.py
+EDT_FILE = f"{DATA_DIR}/EDT_MASTER_S1.xlsx"
+ETU_FILE = f"{DATA_DIR}/ETUDIANTS_MASTER_S1.xlsx"
+
 ORDER_JOUR = {"DIMANCHE":0,"LUNDI":1,"MARDI":2,"MERCREDI":3,"JEUDI":4,"VENDREDI":5,"SAMEDI":6}
-SEMESTRES = ["S1","S2"]              # prêt pour S2
 
 # --------------- Utils ---------------
-def file_for(prefix, sem):
-    return f"{DATA_DIR}/{prefix}_MASTER_{sem}.xlsx"
-
 @st.cache_data
-def load_data(semestre):
-    edt_file = file_for("EDT", semestre)
-    etu_file = file_for("ETUDIANTS", semestre)
-    edt = pd.read_excel(edt_file)
-    etu = pd.read_excel(etu_file)
+def load_data():
+    edt = pd.read_excel(EDT_FILE)
+    etu = pd.read_excel(ETU_FILE)
     # nettoyage minimal
-    for col in ["Niveau","Spécialité","Groupe","Semestre","Jour","Heure début","Heure fin","Matière","Type","Enseignant","Salle","Fréquence","Durée (h)"]:
+    for col in ["Niveau","Spécialité","Groupe","Semestre","Jour","Heure début","Heure fin","Matière","Type","Enseignant","Salle","Fréquence"]:
         if col not in edt.columns:
-            edt[col] = "" if col!="Durée (h)" else 0.0
+            edt[col] = ""
     for col in ["Annee","Semestre","Spécialité","Niveau","Groupe","Nom","Prenom","Matricule","N°","Remarque"]:
         if col not in etu.columns:
             etu[col] = ""
@@ -36,25 +30,31 @@ def load_data(semestre):
     return edt, etu
 
 def time_to_minutes(h):
+    # '08h30' -> minutes
     h = str(h).strip().lower().replace(" ", "")
     if "h" not in h: return None
     hh, mm = h.split("h")
-    return int(hh or 0)*60 + int(mm or 0)
+    return int(hh)*60 + int(mm or 0)
 
 def next_session(now, edt_df, jour_col="Jour"):
+    """Retourne la prochaine séance >= maintenant (jour+heure), sinon la plus proche du prochain jour."""
     if edt_df.empty: return None
+    # construire datetime cible pour chaque ligne (semaine en cours)
+    today_idx = now.weekday()  # 0=lundi ... 6=dimanche
+    # On mappe nos jours à Python : DIMANCHE=6, LUNDI=0 ...
     py_day = {"LUNDI":0,"MARDI":1,"MERCREDI":2,"JEUDI":3,"VENDREDI":4,"SAMEDI":5,"DIMANCHE":6}
-    today_idx = now.weekday()
     rows = []
     for _, r in edt_df.iterrows():
         d_idx = py_day.get(str(r[jour_col]).upper(), None)
         if d_idx is None: continue
+        # trouve la prochaine occurrence de ce jour
         delta = (d_idx - today_idx) % 7
         day_date = (now + timedelta(days=delta)).date()
         m = time_to_minutes(r["Heure début"])
         if m is None: continue
         dt = datetime.combine(day_date, datetime.min.time()) + timedelta(minutes=m)
-        if dt < now:  # déjà passé aujourd'hui
+        # si séance déjà passée aujourd'hui, pousser à la semaine prochaine
+        if dt < now:
             dt = dt + timedelta(days=7)
         rows.append((dt, r))
     if not rows: return None
@@ -72,58 +72,35 @@ def human_delta(dt, now):
     if m: out.append(f"{m}m")
     return " ".join(out) or "0m"
 
-def subgroup(df, semestre="S1", niveau=None, spec=None, groupe=None):
+def subgroup(df, niveau=None, spec=None, groupe=None, semestre="S1"):
     keep = df.copy()
     if semestre: keep = keep[keep["Semestre"].astype(str).str.upper()==semestre.upper()]
-    if niveau:   keep = keep[keep["Niveau"].astype(str).str.upper()==niveau.upper()]
-    if spec:     keep = keep[keep["Spécialité"].astype(str).str.contains(spec, case=False, na=False)]
-    if groupe:   keep = keep[keep["Groupe"].astype(str).str.upper()==groupe.upper()]
+    if niveau: keep = keep[keep["Niveau"].astype(str).str.upper()==niveau.upper()]
+    if spec:   keep = keep[keep["Spécialité"].astype(str).str.contains(spec, case=False, na=False)]
+    if groupe: keep = keep[keep["Groupe"].astype(str).str.upper()==groupe.upper()]
     return keep
 
-def df_to_xlsx_bytes(df):
-    buf = BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as xw:
-        df.to_excel(xw, index=False)
-    return buf.getvalue()
+# --------------- App ---------------
+st.title("🗓️ Portail Génie Civil — EDT & Listes")
 
-# --------------- UI : sidebar ---------------
+edt, etu = load_data()
+
 with st.sidebar:
     st.subheader("🔎 Mode d’accès")
     role = st.radio("Je suis :", ["Étudiant", "Enseignant"], horizontal=True)
-    semestre = st.selectbox("Semestre", SEMESTRES, index=0)
     st.markdown("---")
     st.caption("Filtres rapides")
-    # chargement initial pour remplir les options
-    _edt, _etu = load_data(semestre)
-    niveau  = st.selectbox("Niveau", sorted(_edt["Niveau"].dropna().unique()), index=None, placeholder="Tous")
-    spec    = st.selectbox("Spécialité", sorted(_edt["Spécialité"].dropna().unique()), index=None, placeholder="Toutes")
-    groupe  = st.selectbox("Groupe", sorted(_edt["Groupe"].dropna().unique()), index=None, placeholder="Tous")
+    niveau  = st.selectbox("Niveau", sorted(edt["Niveau"].dropna().unique()), index=None, placeholder="Tous")
+    spec    = st.selectbox("Spécialité", sorted(edt["Spécialité"].dropna().unique()), index=None, placeholder="Toutes")
+    groupe  = st.selectbox("Groupe", sorted(edt["Groupe"].dropna().unique()), index=None, placeholder="Tous")
     st.markdown("---")
     st.caption("Recherche")
     q_nom   = st.text_input("Nom/Prénom (étudiant ou enseignant)")
     st.markdown("---")
-    print_mode = st.checkbox("🖨️ Mode impression (masquer la barre latérale)")
+    st.caption("Astuce : utilise la loupe de ton navigateur pour filtrer plus vite.")
 
-# --------------- Impression : CSS ---------------
-if print_mode:
-    st.markdown("""
-        <style>
-            section[data-testid="stSidebar"] { display: none !important; }
-            .block-container { padding-top: 1rem; padding-bottom: 0; }
-            header { visibility: hidden; height: 0; }
-            @media print {
-                .stButton, .stDownloadButton, [data-testid="stFileUploader"] { display: none !important; }
-                .stDataFrame { border: none !important; }
-            }
-        </style>
-    """, unsafe_allow_html=True)
-
-# --------------- Chargement des données ---------------
-edt, etu = load_data(semestre)
 now = datetime.now()
-bloc = subgroup(edt, semestre, niveau, spec, groupe)
-
-st.title("🗓️ Portail Génie Civil — EDT & Listes")
+bloc = subgroup(edt, niveau, spec, groupe, semestre="S1")
 
 # ------------------- Étudiant -------------------
 if role == "Étudiant":
@@ -132,13 +109,7 @@ if role == "Étudiant":
     col1, col2 = st.columns([2,1])
     with col1:
         st.subheader("Mon EDT")
-        view = bloc[["Jour","Heure début","Heure fin","Matière","Type","Enseignant","Salle","Fréquence"]]
-        st.dataframe(view, use_container_width=True)
-        st.download_button("⬇️ Export (CSV)", data=view.to_csv(index=False).encode("utf-8-sig"),
-                           file_name=f"EDT_{(niveau or 'X')}_{(groupe or 'X')}_{semestre}.csv",
-                           mime="text/csv")
-        st.download_button("⬇️ Export (XLSX)", data=df_to_xlsx_bytes(view),
-                           file_name=f"EDT_{(niveau or 'X')}_{(groupe or 'X')}_{semestre}.xlsx")
+        st.dataframe(bloc[["Jour","Heure début","Heure fin","Matière","Type","Enseignant","Salle","Fréquence"]], use_container_width=True)
 
     with col2:
         st.subheader("Prochaine séance")
@@ -154,17 +125,18 @@ if role == "Étudiant":
             st.info("Aucune séance trouvée avec les filtres actuels.")
 
     st.subheader("Liste des étudiants (groupe sélectionné)")
-    etu_g = subgroup(etu, semestre, niveau, spec, groupe)[["N°","Matricule","Nom","Prenom","Remarque"]].reset_index(drop=True)
+    etu_g = subgroup(etu, niveau, spec, groupe, semestre="S1")[["N°","Matricule","Nom","Prenom","Remarque"]].reset_index(drop=True)
     if etu_g.empty:
         st.warning("Aucune liste d’étudiants correspondante.")
     else:
+        # feuille de présence locale (session uniquement)
         etu_g["Présent"] = False
         edited = st.data_editor(etu_g, use_container_width=True, height=420, num_rows="fixed")
-        st.download_button("⬇️ Feuille de présence (CSV)",
+        st.download_button("⬇️ Télécharger la feuille de présence (CSV)",
                            data=edited.to_csv(index=False).encode("utf-8-sig"),
-                           file_name=f"presence_{(niveau or 'X')}_{(groupe or 'X')}_{semestre}.csv",
+                           file_name=f"presence_{(niveau or 'X')}_{(groupe or 'X')}_S1.csv",
                            mime="text/csv")
-        st.caption("ℹ️ Coche Présent/Absent, puis télécharge le CSV ou fais une capture (Ctrl/Cmd+P).")
+        st.caption("ℹ️ Coche Présent/Absent, puis télécharge le CSV ou fais une capture d’écran.")
 
     st.subheader("Je cherche mon nom")
     if q_nom:
@@ -175,21 +147,13 @@ if role == "Étudiant":
 else:
     st.header("👨‍🏫 Espace Enseignant")
 
-    # Planning filtré & export
-    planning = bloc.copy()
-    if q_nom:
-        planning = planning[planning["Enseignant"].str.contains(q_nom, case=False, na=False)]
-    planning_view = planning[["Jour","Heure début","Heure fin","Matière","Type","Groupe","Salle","Fréquence","Spécialité"]]
     st.subheader("Planning filtré")
-    st.dataframe(planning_view, use_container_width=True)
-    st.download_button("⬇️ Export planning (CSV)", data=planning_view.to_csv(index=False).encode("utf-8-sig"),
-                       file_name=f"planning_{(q_nom or 'enseignant')}_{semestre}.csv", mime="text/csv")
-    st.download_button("⬇️ Export planning (XLSX)", data=df_to_xlsx_bytes(planning_view),
-                       file_name=f"planning_{(q_nom or 'enseignant')}_{semestre}.xlsx")
+    if q_nom:
+        bloc = bloc[bloc["Enseignant"].str.contains(q_nom, case=False, na=False)]
+    st.dataframe(bloc[["Jour","Heure début","Heure fin","Matière","Type","Groupe","Salle","Fréquence","Spécialité"]], use_container_width=True)
 
-    # Prochaine séance + compte à rebours
     st.subheader("Ma prochaine séance")
-    nxt = next_session(now, planning)
+    nxt = next_session(now, bloc)
     if nxt:
         dt, r = nxt
         st.metric(
@@ -200,41 +164,22 @@ else:
     else:
         st.info("Aucune séance trouvée avec les filtres actuels.")
 
-    # Où trouver un enseignant (salles)
     st.subheader("Trouver une salle pour un enseignant")
     if q_nom:
         salles = edt[edt["Enseignant"].str.contains(q_nom, case=False, na=False)][["Jour","Heure début","Heure fin","Salle","Groupe","Spécialité"]]
         st.dataframe(salles.sort_values(["Jour","Heure début"]), use_container_width=True)
 
-    # Liste des étudiants du groupe
     st.subheader("Liste des étudiants du groupe sélectionné")
-    etu_g = subgroup(etu, semestre, niveau, spec, groupe)[["N°","Matricule","Nom","Prenom","Remarque"]].reset_index(drop=True)
+    etu_g = subgroup(etu, niveau, spec, groupe, semestre="S1")[["N°","Matricule","Nom","Prenom","Remarque"]].reset_index(drop=True)
     if etu_g.empty:
         st.warning("Aucune liste d’étudiants correspondante.")
     else:
         etu_g["Présent"] = False
         edited = st.data_editor(etu_g, use_container_width=True, height=420, num_rows="fixed")
-        st.download_button("⬇️ Feuille de présence (CSV)",
+        st.download_button("⬇️ Télécharger la feuille de présence (CSV)",
                            data=edited.to_csv(index=False).encode("utf-8-sig"),
-                           file_name=f"presence_{(niveau or 'X')}_{(groupe or 'X')}_{semestre}.csv",
+                           file_name=f"presence_{(niveau or 'X')}_{(groupe or 'X')}_S1.csv",
                            mime="text/csv")
 
-    # --------- CHARGE HORAIRE ---------
-    st.subheader("Charge horaire (heures / semaine)")
-    # somme des Durée (h), groupée
-    charges = edt.groupby(["Enseignant","Matière"], dropna=False)["Durée (h)"].sum().reset_index()
-    if q_nom:
-        charges = charges[charges["Enseignant"].str.contains(q_nom, case=False, na=False)]
-    # total par enseignant
-    total_ens = charges.groupby("Enseignant", dropna=False)["Durée (h)"].sum().reset_index().rename(columns={"Durée (h)":"Total (h)"})
-    st.write("**Total par enseignant :**")
-    st.dataframe(total_ens.sort_values("Total (h)", ascending=False), use_container_width=True, height=260)
-    st.download_button("⬇️ Export charge totale (CSV)", data=total_ens.to_csv(index=False).encode("utf-8-sig"),
-                       file_name=f"charge_totale_{semestre}.csv", mime="text/csv")
-    st.write("**Détail par matière :**")
-    st.dataframe(charges.sort_values(["Enseignant","Durée (h)"], ascending=[True,False]), use_container_width=True, height=300)
-    st.download_button("⬇️ Export charge détaillée (CSV)", data=charges.to_csv(index=False).encode("utf-8-sig"),
-                       file_name=f"charge_detail_{semestre}.csv", mime="text/csv")
-
 st.divider()
-st.caption("Données : EDT_MASTER_* & ETUDIANTS_MASTER_* • Sessions isolées (Streamlit) • Mode impression via Ctrl/Cmd+P.")
+st.caption("Données : EDT_MASTER_S1 & ETUDIANTS_MASTER_S1 • Sessions isolées (Streamlit) • Aucune donnée modifiée côté serveur.")
