@@ -196,6 +196,23 @@ with st.sidebar:
     st.subheader("🔎 Mode d’accès")
     role = st.radio("Je suis :", ["Étudiant", "Enseignant"], horizontal=True)
     st.markdown("---")
+    st.caption("Navigation rapide")
+    if role == "Étudiant":
+        sections = [
+            "Mon emploi du temps",
+            "Prochaine séance",
+            "Liste des étudiants",
+            "Recherche par nom",
+        ]
+    else:
+        sections = [
+            "Planning filtré",
+            "Ma prochaine séance",
+            "Trouver une salle",
+            "Liste des étudiants",
+        ]
+    section = st.radio("Accéder à :", sections, key="nav_section")
+    st.markdown("---")
     st.caption("Filtres rapides")
     niveau  = st.selectbox("Niveau", sorted(edt["Niveau"].dropna().unique()), index=None, placeholder="Tous")
     spec    = st.selectbox("Spécialité", sorted(edt["Spécialité"].dropna().unique()), index=None, placeholder="Toutes")
@@ -213,12 +230,14 @@ bloc = subgroup(edt, niveau, spec, groupe, semestre="S1")
 if role == "Étudiant":
     st.header("👩‍🎓 Espace Étudiant")
 
-    col1, col2 = st.columns([2,1])
-    with col1:
+    if section == "Mon emploi du temps":
         st.subheader("Mon EDT")
-        st.dataframe(bloc[["Jour","Heure début","Heure fin","Matière","Type","Enseignant","Salle","Fréquence"]], use_container_width=True)
+        st.dataframe(
+            bloc[["Jour","Heure début","Heure fin","Matière","Type","Enseignant","Salle","Fréquence"]],
+            use_container_width=True,
+        )
 
-    with col2:
+    if section == "Prochaine séance":
         st.subheader("Prochaine séance")
         nxt = next_session(now, bloc)
         if nxt:
@@ -231,62 +250,84 @@ if role == "Étudiant":
         else:
             st.info("Aucune séance trouvée avec les filtres actuels.")
 
-    st.subheader("Liste des étudiants (groupe sélectionné)")
-    etu_g = subgroup(etu, niveau, spec, groupe, semestre="S1")[["N°","Matricule","Nom","Prenom","Remarque"]].reset_index(drop=True)
-    if etu_g.empty:
-        st.warning("Aucune liste d’étudiants correspondante.")
-    else:
-        # feuille de présence locale (session uniquement)
-        etu_g["Présent"] = False
-        edited = st.data_editor(etu_g, use_container_width=True, height=420, num_rows="fixed")
-        st.download_button("⬇️ Télécharger la feuille de présence (CSV)",
-                           data=edited.to_csv(index=False).encode("utf-8-sig"),
-                           file_name=f"presence_{(niveau or 'X')}_{(groupe or 'X')}_S1.csv",
-                           mime="text/csv")
-        st.caption("ℹ️ Coche Présent/Absent, puis télécharge le CSV ou fais une capture d’écran.")
+    if section == "Liste des étudiants":
+        st.subheader("Liste des étudiants (groupe sélectionné)")
+        etu_g = subgroup(etu, niveau, spec, groupe, semestre="S1")[["N°","Matricule","Nom","Prenom","Remarque"]].reset_index(drop=True)
+        if etu_g.empty:
+            st.warning("Aucune liste d’étudiants correspondante.")
+        else:
+            # feuille de présence locale (session uniquement)
+            etu_g["Présent"] = False
+            edited = st.data_editor(etu_g, use_container_width=True, height=420, num_rows="fixed")
+            st.download_button(
+                "⬇️ Télécharger la feuille de présence (CSV)",
+                data=edited.to_csv(index=False).encode("utf-8-sig"),
+                file_name=f"presence_{(niveau or 'X')}_{(groupe or 'X')}_S1.csv",
+                mime="text/csv",
+            )
+            st.caption("ℹ️ Coche Présent/Absent, puis télécharge le CSV ou fais une capture d’écran.")
 
-    st.subheader("Je cherche mon nom")
-    if q_nom:
-        hits = etu[etu.apply(lambda r: q_nom.lower() in f"{r['Nom']} {r['Prenom']}".lower(), axis=1)]
-        st.dataframe(hits[["Nom","Prenom","Niveau","Spécialité","Groupe","Semestre","Remarque"]], use_container_width=True)
+    if section == "Recherche par nom":
+        st.subheader("Je cherche mon nom")
+        if q_nom:
+            hits = etu[etu.apply(lambda r: q_nom.lower() in f"{r['Nom']} {r['Prenom']}".lower(), axis=1)]
+            st.dataframe(
+                hits[["Nom","Prenom","Niveau","Spécialité","Groupe","Semestre","Remarque"]],
+                use_container_width=True,
+            )
+        else:
+            st.info("Saisis un nom dans la barre latérale pour lancer la recherche.")
 
 # ------------------- Enseignant -------------------
 else:
     st.header("👨‍🏫 Espace Enseignant")
 
-    st.subheader("Planning filtré")
+    enseignant_bloc = bloc
     if q_nom:
-        bloc = bloc[bloc["Enseignant"].str.contains(q_nom, case=False, na=False)]
-    st.dataframe(bloc[["Jour","Heure début","Heure fin","Matière","Type","Groupe","Salle","Fréquence","Spécialité"]], use_container_width=True)
+        enseignant_bloc = enseignant_bloc[enseignant_bloc["Enseignant"].str.contains(q_nom, case=False, na=False)]
 
-    st.subheader("Ma prochaine séance")
-    nxt = next_session(now, bloc)
-    if nxt:
-        dt, r = nxt
-        st.metric(
-            label=f"{r['Jour']} • {r['Heure début']}–{r['Heure fin']}",
-            value=f"{r['Matière']} ({r['Type']})",
-            delta=f"Dans {human_delta(dt, now)} • Salle {r['Salle']} • Groupe {r['Groupe']}"
+    if section == "Planning filtré":
+        st.subheader("Planning filtré")
+        st.dataframe(
+            enseignant_bloc[["Jour","Heure début","Heure fin","Matière","Type","Groupe","Salle","Fréquence","Spécialité"]],
+            use_container_width=True,
         )
-    else:
-        st.info("Aucune séance trouvée avec les filtres actuels.")
 
-    st.subheader("Trouver une salle pour un enseignant")
-    if q_nom:
-        salles = edt[edt["Enseignant"].str.contains(q_nom, case=False, na=False)][["Jour","Heure début","Heure fin","Salle","Groupe","Spécialité"]]
-        st.dataframe(salles.sort_values(["Jour","Heure début"]), use_container_width=True)
+    if section == "Ma prochaine séance":
+        st.subheader("Ma prochaine séance")
+        nxt = next_session(now, enseignant_bloc)
+        if nxt:
+            dt, r = nxt
+            st.metric(
+                label=f"{r['Jour']} • {r['Heure début']}–{r['Heure fin']}",
+                value=f"{r['Matière']} ({r['Type']})",
+                delta=f"Dans {human_delta(dt, now)} • Salle {r['Salle']} • Groupe {r['Groupe']}"
+            )
+        else:
+            st.info("Aucune séance trouvée avec les filtres actuels.")
 
-    st.subheader("Liste des étudiants du groupe sélectionné")
-    etu_g = subgroup(etu, niveau, spec, groupe, semestre="S1")[["N°","Matricule","Nom","Prenom","Remarque"]].reset_index(drop=True)
-    if etu_g.empty:
-        st.warning("Aucune liste d’étudiants correspondante.")
-    else:
-        etu_g["Présent"] = False
-        edited = st.data_editor(etu_g, use_container_width=True, height=420, num_rows="fixed")
-        st.download_button("⬇️ Télécharger la feuille de présence (CSV)",
-                           data=edited.to_csv(index=False).encode("utf-8-sig"),
-                           file_name=f"presence_{(niveau or 'X')}_{(groupe or 'X')}_S1.csv",
-                           mime="text/csv")
+    if section == "Trouver une salle":
+        st.subheader("Trouver une salle pour un enseignant")
+        if q_nom:
+            salles = edt[edt["Enseignant"].str.contains(q_nom, case=False, na=False)][["Jour","Heure début","Heure fin","Salle","Groupe","Spécialité"]]
+            st.dataframe(salles.sort_values(["Jour","Heure début"]), use_container_width=True)
+        else:
+            st.info("Saisis le nom d’un enseignant dans la barre latérale pour afficher ses salles.")
+
+    if section == "Liste des étudiants":
+        st.subheader("Liste des étudiants du groupe sélectionné")
+        etu_g = subgroup(etu, niveau, spec, groupe, semestre="S1")[["N°","Matricule","Nom","Prenom","Remarque"]].reset_index(drop=True)
+        if etu_g.empty:
+            st.warning("Aucune liste d’étudiants correspondante.")
+        else:
+            etu_g["Présent"] = False
+            edited = st.data_editor(etu_g, use_container_width=True, height=420, num_rows="fixed")
+            st.download_button(
+                "⬇️ Télécharger la feuille de présence (CSV)",
+                data=edited.to_csv(index=False).encode("utf-8-sig"),
+                file_name=f"presence_{(niveau or 'X')}_{(groupe or 'X')}_S1.csv",
+                mime="text/csv",
+            )
 
 st.divider()
 st.caption("Données : EDT_MASTER_S1 & ETUDIANTS_MASTER_S1 • Sessions isolées (Streamlit) • Aucune donnée modifiée côté serveur.")
