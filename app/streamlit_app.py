@@ -1,4 +1,6 @@
-import time
+from pathlib import Path
+from typing import Tuple
+
 import pandas as pd
 import streamlit as st
 from datetime import datetime, timedelta
@@ -6,22 +8,56 @@ from datetime import datetime, timedelta
 # ---------------- Config ----------------
 st.set_page_config(page_title="EDT & Listes • Génie Civil", page_icon="🗓️", layout="wide")
 
-DATA_DIR = "data/processed"          # dossiers générés par build_master.py
-EDT_FILE = f"{DATA_DIR}/EDT_MASTER_S1.xlsx"
-ETU_FILE = f"{DATA_DIR}/ETUDIANTS_MASTER_S1.xlsx"
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR.parent / "data" / "processed"  # dossiers générés par build_master.py
+EDT_FILE = DATA_DIR / "EDT_MASTER_S1.xlsx"
+ETU_FILE = DATA_DIR / "ETUDIANTS_MASTER_S1.xlsx"
 
 ORDER_JOUR = {"DIMANCHE":0,"LUNDI":1,"MARDI":2,"MERCREDI":3,"JEUDI":4,"VENDREDI":5,"SAMEDI":6}
 
 # --------------- Utils ---------------
 @st.cache_data
-def load_data():
+def load_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
+    edt_cols = [
+        "Niveau",
+        "Spécialité",
+        "Groupe",
+        "Semestre",
+        "Jour",
+        "Heure début",
+        "Heure fin",
+        "Matière",
+        "Type",
+        "Enseignant",
+        "Salle",
+        "Fréquence",
+    ]
+    etu_cols = [
+        "Annee",
+        "Semestre",
+        "Spécialité",
+        "Niveau",
+        "Groupe",
+        "Nom",
+        "Prenom",
+        "Matricule",
+        "N°",
+        "Remarque",
+    ]
+
+    if not EDT_FILE.exists() or not ETU_FILE.exists():
+        st.error(
+            "Les fichiers sources sont introuvables. Vérifie que le dossier `data/processed` contient bien les fichiers Excel attendus."
+        )
+        return pd.DataFrame(columns=edt_cols), pd.DataFrame(columns=etu_cols)
+
     edt = pd.read_excel(EDT_FILE)
     etu = pd.read_excel(ETU_FILE)
     # nettoyage minimal
-    for col in ["Niveau","Spécialité","Groupe","Semestre","Jour","Heure début","Heure fin","Matière","Type","Enseignant","Salle","Fréquence"]:
+    for col in edt_cols:
         if col not in edt.columns:
             edt[col] = ""
-    for col in ["Annee","Semestre","Spécialité","Niveau","Groupe","Nom","Prenom","Matricule","N°","Remarque"]:
+    for col in etu_cols:
         if col not in etu.columns:
             etu[col] = ""
     # tri lisible
