@@ -1,19 +1,22 @@
-# app/streamlit_app.py — S1 uniquement, charge depuis data/raw/*
+# app/streamlit_app.py — version corrigée (S1 uniquement)
 import glob
 from io import BytesIO
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
+# ---------------- Configuration générale ----------------
 st.set_page_config(page_title="EDT & Listes • Génie Civil (S1)", page_icon="🗓️", layout="wide")
 
-RAW_EDT = "data/raw/edt"
-RAW_STU = "data/raw/students"
+BASE_DIR = Path(__file__).resolve().parent        # → /app
+RAW_EDT = str(BASE_DIR / "data" / "raw" / "edt")
+RAW_STU = str(BASE_DIR / "data" / "raw" / "students")
 ORDER_JOUR = {"DIMANCHE":0,"LUNDI":1,"MARDI":2,"MERCREDI":3,"JEUDI":4,"VENDREDI":5,"SAMEDI":6}
-SEMESTRE = "S1"     # <— un seul semestre
+SEMESTRE = "S1"     # un seul semestre
 
-# ---------- utils lecture ----------
+# ---------- utilitaires ----------
 def read_any(path):
     return pd.read_csv(path) if path.lower().endswith(".csv") else pd.read_excel(path)
 
@@ -53,7 +56,7 @@ def next_session(now, edt_df):
         m = time_to_minutes(r["Heure début"])
         if m is None: continue
         dt = datetime.combine(day_date, datetime.min.time()) + timedelta(minutes=m)
-        if dt < now:  # déjà passé aujourd'hui
+        if dt < now:
             dt = dt + timedelta(days=7)
         rows.append((dt, r))
     if not rows: return None
@@ -80,9 +83,7 @@ def load_raw_s1():
         try:
             df = read_any(f)
             df = ensure_cols(df, EDT_COLS, numeric=["Durée (h)"])
-            # Forcer S1 si vide
             df["Semestre"] = df["Semestre"].replace("", SEMESTRE)
-            # Valeurs par défaut
             df["Fréquence"] = df["Fréquence"].replace("", "Hebdo")
             edt_list.append(df)
         except Exception as e:
@@ -102,7 +103,6 @@ def load_raw_s1():
         except Exception as e:
             st.warning(f"Liste ignorée: {f} ({e})")
     etu = pd.concat(stu_list, ignore_index=True) if stu_list else pd.DataFrame(columns=STU_COLS)
-
     return edt, etu
 
 def subgroup(df, niveau=None, spec=None, groupe=None):
@@ -112,15 +112,21 @@ def subgroup(df, niveau=None, spec=None, groupe=None):
     if groupe:   keep = keep[keep["Groupe"].astype(str).str.upper()==groupe.upper()]
     return keep
 
-# ---------- UI ----------
+# ---------------- Interface utilisateur ----------------
 st.title("🗓️ Portail Génie Civil — EDT & Listes (S1)")
 
 edt, etu = load_raw_s1()
 if edt.empty:
-    st.error("Aucun EDT S1 trouvé dans `data/raw/edt/`. Vérifie que tes fichiers se terminent par `_S1.xlsx` ou `_S1.csv` et sont committés dans le dépôt.")
+    st.error("Aucun EDT S1 trouvé dans `app/data/raw/edt/`. Vérifie les noms de fichiers `_S1.xlsx` ou `.csv`.")
     st.stop()
 if etu.empty:
-    st.warning("Aucune liste d’étudiants S1 trouvée dans `data/raw/students/` (l’appli fonctionne mais sans feuilles de présence).")
+    st.warning("Aucune liste d’étudiants S1 trouvée dans `app/data/raw/students/` (l’appli fonctionne mais sans feuilles de présence).")
+
+# 🔍 Debug pour vérifier les fichiers trouvés
+import glob
+with st.expander("🔍 Debug fichiers chargés", expanded=False):
+    st.write("EDT trouvés :", glob.glob(f"{RAW_EDT}/*_S1.*"))
+    st.write("ETUDIANTS trouvés :", glob.glob(f"{RAW_STU}/*_S1.*"))
 
 with st.sidebar:
     st.subheader("🔎 Mode d’accès")
@@ -235,4 +241,4 @@ else:
                            file_name=f"presence_{(niveau or 'X')}_{(groupe or 'X')}_S1.csv")
 
 st.divider()
-st.caption("S1 uniquement • Lecture directe de data/raw/edt & data/raw/students • Sessions isolées (Streamlit).")
+st.caption("S1 uniquement • Lecture directe de app/data/raw/edt & app/data/raw/students • Sessions isolées (Streamlit).")
