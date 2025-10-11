@@ -295,7 +295,7 @@ def load_raw_s1():
     for f in stu_files:
         try:
             df = read_any(f)
-            df = harmonize_student_columns(df)         # <— harmonisation
+            df = harmonize_student_columns(df)         # harmonisation
             df = ensure_cols(df, STU_COLS)             # garantit les colonnes
             df["Semestre"] = df["Semestre"].apply(normalize_semestre)
             df["Groupe"]   = df["Groupe"].apply(normalize_groupe)
@@ -392,13 +392,10 @@ if role == "Étudiant":
 
     with tab_edt:
         st.markdown("#### Emploi du temps")
-        c1, c2 = st.columns([1,1])
-        with c1:
-            st.download_button("⬇️ Export EDT (CSV)", view.to_csv(index=False).encode("utf-8-sig"),
-                               file_name=f"EDT_{spec}_{niv}_G{groupe}_S1.csv", use_container_width=True)
-        with c2:
-            st.download_button("⬇️ Export EDT (XLSX)", df_to_xlsx_bytes(view),
-                               file_name=f"EDT_{spec}_{niv}_G{groupe}_S1.xlsx", use_container_width=True)
+        st.download_button("⬇️ Exporter l’EDT en Excel",
+                           df_to_xlsx_bytes(view),
+                           file_name=f"EDT_{spec}_{niv}_G{groupe}_S1.xlsx",
+                           use_container_width=True)
         st.dataframe(view.rename(columns={"Heure début":"Début","Heure fin":"Fin"}), use_container_width=True, hide_index=True)
 
     with tab_next:
@@ -438,17 +435,10 @@ else:
         if q_nom:
             planning = planning[planning["Enseignant"].str.contains(q_nom, case=False, na=False)]
         plan_view = planning[["Jour","Heure début","Heure fin","Matière","Type","Salle","Groupe"]]
-        c1, c2 = st.columns([1,1])
-        with c1:
-            st.download_button("⬇️ Export Planning (CSV)",
-                               plan_view.to_csv(index=False).encode("utf-8-sig"),
-                               file_name=f"Planning_{spec}_{niv}_G{groupe}_S1.csv",
-                               use_container_width=True)
-        with c2:
-            st.download_button("⬇️ Export Planning (XLSX)",
-                               df_to_xlsx_bytes(plan_view),
-                               file_name=f"Planning_{spec}_{niv}_G{groupe}_S1.xlsx",
-                               use_container_width=True)
+        st.download_button("⬇️ Exporter le planning en Excel",
+                           df_to_xlsx_bytes(plan_view),
+                           file_name=f"Planning_{spec}_{niv}_G{groupe}_S1.xlsx",
+                           use_container_width=True)
         st.dataframe(plan_view, use_container_width=True, hide_index=True)
 
     # ------ Prochaine séance
@@ -496,8 +486,8 @@ else:
                 future = g[g["__start"] >= now_min].sort_values("__start")
                 if not future.empty:
                     r = future.iloc[0]
-                    dt = minutes_to_dt(now, int(r["__start"]))
-                    statut = f"Dans {human_delta(dt, now)}"
+                    dtm = minutes_to_dt(now, int(r["__start"]))
+                    statut = f"Dans {human_delta(dtm, now)}"
                     order = 0  # à venir
                 else:
                     r = g.sort_values("__start").iloc[-1]
@@ -536,7 +526,6 @@ else:
 
         base_cols = [c for c in ["N°","Matricule","Nom","Prenom","Remarque"] if c in etu_g_raw.columns]
         if not base_cols:
-            # fallback minimal (afficher ce qu'on a)
             base_cols = [c for c in etu_g_raw.columns if c not in {"Spec2","Niv2","Semestre"}][:5]
 
         etu_g = etu_g_raw[base_cols].reset_index(drop=True)
@@ -570,17 +559,10 @@ else:
             )
             st.session_state[key_df] = edited
 
-            c1, c2 = st.columns([1,1])
-            with c1:
-                st.download_button("⬇️ Export présence (CSV)",
-                                   edited.to_csv(index=False).encode("utf-8-sig"),
-                                   file_name=f"presence_{spec}_{niv}_G{groupe}_S1.csv",
-                                   use_container_width=True)
-            with c2:
-                st.download_button("⬇️ Export présence (XLSX)",
-                                   df_to_xlsx_bytes(edited),
-                                   file_name=f"presence_{spec}_{niv}_G{groupe}_S1.xlsx",
-                                   use_container_width=True)
+            st.download_button("⬇️ Exporter la présence en Excel",
+                               df_to_xlsx_bytes(edited),
+                               file_name=f"presence_{spec}_{niv}_G{groupe}_S1.xlsx",
+                               use_container_width=True)
 
 st.divider()
-st.caption("S1 • Spécialité → Niveau → Groupe • Groupes normalisés (G11/G12) • Harmonisation listes étudiants • Feuille de présence côté enseignant uniquement.")
+st.caption("S1 • Spécialité → Niveau → Groupe • Groupes normalisés (G11/G12) • Harmonisation listes étudiants • Exports uniquement en Excel (.xlsx).")
