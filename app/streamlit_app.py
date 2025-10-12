@@ -6,9 +6,10 @@
 # - Filtres Spécialité → Niveau → Groupe
 # - Normalisation EDT & listes étudiants (S1)
 # - Inférence robuste depuis nom de fichier (2ING, ING2, etc.)
-# - Export Excel uniquement (.xlsx)
-# - Feuille de présence mobile (sans matricule) + Tout cocher / Tout décocher
-# - Panneaux diagnostic (désactivable)
+# - Export Excel (.xlsx) pour EDT/Planning
+# - Feuille de présence mobile (sans matricule) + Remarque + Tout cocher/décocher
+# - Export PDF présence avec en-tête institutionnel
+# - Panneaux diagnostic masqués par défaut
 # ======================================================================
 
 from __future__ import annotations
@@ -22,6 +23,12 @@ from typing import Tuple, Optional, Iterable, Dict, Any
 
 import pandas as pd
 import streamlit as st
+
+# --- pour l'export PDF ---
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+from reportlab.lib.units import cm
+from reportlab.lib import colors
 
 # --------------------------- CONFIG GLOBALE ----------------------------
 
@@ -436,6 +443,123 @@ def pretty_level_label(spec: str, niv: str) -> str:
     if spec == "LICENCE": return f"LICENCE {niv}"
     if spec == "INGENIEUR": return f"INGENIEUR {niv}"
     return niv
+
+# -------------------------- PDF DE PRÉSENCE ---------------------------
+
+def make_presence_pdf(
+    df: pd.DataFrame,
+    titre: str,
+    meta: str,
+    header: Optional[dict] = None,
+) -> bytes:
+    """
+    Génère un PDF A4 :
+    - entête institutionnelle (Université / Faculté / Département / Spécialité + Groupe)
+    - titre + méta (date/heure)
+    - tableau : N°, Nom complet, Présent, Remarque
+    """
+    buf = BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    width, height = A4
+    margin = 1.2 * cm
+    y = height - margin
+
+    # -------- Entête institutionnelle (centrée) --------
+    if header is None:
+        header = {}
+    univ = header.get("univ", "UNIVERSITÉ DE TLEMCEN").upper()
+    fac  = header.get("fac",  "FACULTÉ DE TECHNOLOGIE").upper()
+    dept = header.get("dept", "DÉPARTEMENT DE GÉNIE CIVIL").upper()
+    spec_line = header.get("spec", "").strip()       # ex: "Spécialité : RIB — Niveau : M1"
+    grp_line  = header.get("grp", "").strip()        # ex: "Groupe : G11"
+
+    c.setFont("Helvetica-Bold", 12)
+    c.drawCentredString(width/2, y, univ); y -= 14
+    c.setFont("Helvetica-Bold", 11)
+    c.drawCentredString(width/2, y, fac);  y -= 13
+    c.drawCentredString(width/2, y, dept); y -= 15
+
+    if spec_line or grp_line:
+        c.setFont("Helvetica", 10)
+        if spec_line:
+            c.drawCentredString(width/2, y, spec_line); y -= 12
+        if grp_line:
+            c.drawCentredString(width/2, y, grp_line);  y -= 12
+
+    # petite ligne de séparation
+    c.setStrokeColor(colors.grey)
+    c.line(margin, y, width - margin, y)
+    y -= 10
+    c.setStrokeColor(colors.black)
+
+    # -------- Titre + méta (gauche) --------
+    c.setFont("Helvetica-Bold", 13)
+    c.drawString(margin, y, titre)
+    y -= 16
+    c.setFont("Helvetica", 10)
+    c.setFillColor(colors.black)
+    c.drawString(margin, y, meta)
+    y -= 18
+
+    # Dimensions colonnes : N° | Nom complet | Présent | Remarque
+    w_num = 1.0 * cm
+    w_pres = 2.0 * cm
+    w_nom = width - 2 * margin - w_num - w_pres - 6.2 * cm
+    if w_nom < 6.0 * cm:
+        w_nom = 6.0 * cm
+    w_rem = width - 2 * margin - w_num - w_pres - w_nom
+
+    row_h = 13
+
+    def new_page_header(page_idx: int):
+        """Entête de page : titre + méta (pages suivantes)."""
+        nonlocal y
+        if y < margin + 4 * row_h:
+            c.showPage()
+            y = height - margin
+            c.setFont("Helvetica-Bold", 13)
+            c.drawString(margin, y, f"{titre}  (p.{page_idx})")
+            y -= 16
+            c.setFont("Helvetica", 10)
+            c.drawString(margin, y, meta)
+            y -= 18
+
+        # entête tableau
+        c.setFont("Helvetica-Bold", 10)
+        x = margin
+        for header_txt, w in [("N°", w_num), ("Nom complet", w_nom), ("Présent", w_pres), ("Remarque", w_rem)]:
+            c.rect(x, y - row_h, w, row_h, stroke=1, fill=0)
+            c.drawString(x + 3, y - row_h + 3, header_txt)
+            x += w
+        y -= row_h
+        c.setFont("Helvetica", 9)
+
+    page_idx = 1
+    new_page_header(page_idx)
+
+    # Corps du tableau
+    for i, r in df.reset_index(drop=True).iterrows():
+        if y < margin + row_h:
+            page_idx += 1
+            new_page_header(page_idx)
+        x = margin
+        vals = [
+            str(i + 1),
+            str(r.get("Nom complet", "")),
+            ("✔" if bool(r.get("Présent", False)) else ""),
+            str(r.get("Remarque", "") or ""),
+        ]
+        for (val, w) in zip(vals, [w_num, w_nom, w_pres, w_rem]):
+            c.rect(x, y - row_h, w, row_h, stroke=1, fill=0)
+            c.drawString(x + 3, y - row_h + 3, val[:120])
+            x += w
+        y -= row_h
+
+    c.showPage()
+    c.save()
+    pdf = buf.getvalue()
+    buf.close()
+    return pdf
 # ============================ INTERFACE ===============================
 
 st.title("🗓️ Portail Génie Civil — EDT & Listes (S1)")
@@ -502,16 +626,6 @@ if print_mode:
 
 bloc = subgroup_by_spec_level(edt, spec, niv, groupe)
 
-# 🔍 Diagnostic si EDT vide pour les filtres actuels
-if bloc.empty and SHOW_DIAGNOSTIC:
-    with st.expander("🔍 Diagnostic (EDT vide pour ce filtre)", expanded=False):
-        df_spec = edt[edt["Spec2"] == spec]
-        st.write("Niveaux disponibles pour", spec, ":", sorted(df_spec["Niv2"].dropna().unique().tolist()))
-        st.write("Groupes vus pour", spec, niv, ":", sorted(
-            df_spec[df_spec["Niv2"] == niv]["Groupe"].dropna().map(normalize_groupe).unique().tolist()
-        ))
-        st.write("Exemples de fichiers détectés dans EDT :", [Path(p).name for p in glob.glob(f"{RAW_EDT}/*")][:12])
-
 now = datetime.now()
 title_clean = f"{spec} {pretty_level_label(spec, niv)}".strip()
 # ============================ VUE ÉTUDIANT ============================
@@ -535,6 +649,7 @@ if role == "Étudiant":
 
     with tab_next:
         st.markdown("#### À venir")
+
         def next_session(df: pd.DataFrame) -> Optional[Tuple[datetime, pd.Series]]:
             if df.empty:
                 return None
@@ -600,9 +715,7 @@ else:
 
     with tab_next:
         st.markdown("#### Ma prochaine séance")
-        # réutilise next_session défini ci-dessus (Étudiant)
-        nxt = (lambda df: (None if df.empty else __import__("builtins")))(bloc)  # no-op to keep linter calm
-        # petite redéfinition locale pour éviter dépendance
+
         def _next(df: pd.DataFrame) -> Optional[Tuple[datetime, pd.Series]]:
             if df.empty: return None
             py = {"LUNDI":0,"MARDI":1,"MERCREDI":2,"JEUDI":3,"VENDREDI":4,"SAMEDI":5,"DIMANCHE":6}
@@ -619,6 +732,7 @@ else:
                 rows.append((dt, r))
             if not rows: return None
             rows.sort(key=lambda x:x[0]); return rows[0]
+
         nxt = _next(bloc)
 
         if nxt:
@@ -724,116 +838,148 @@ else:
                 st.dataframe(df_where.drop(columns=["_order0","_order1"]),
                              use_container_width=True, hide_index=True)
 
-    # ---- Feuille de présence (enseignant) — mobile friendly
+    # ---- Feuille de présence (enseignant) — mobile friendly + PDF
     with tab_presence:
         st.markdown("#### Feuille de présence (enseignant)")
 
-        mobile_mode = st.toggle("📱 Mode mobile (affichage compact)", value=True,
-                                help="Affiche seulement Nom et Présent (idéal sur smartphone)")
+        # ➜ mode mobile : on affiche une page de X étudiants, sans défilement horizontal
+        mobile_mode = st.toggle(
+            "📱 Mode mobile (affichage compact)", value=True,
+            help="Affiche par pages : Nom + Présent + Remarque (idéal sur smartphone)"
+        )
 
         q_filter = st.text_input("🔎 Recherche rapide (Nom/Prénom) :", value="").strip()
 
+        # --- données brutes groupe
         etu_g_raw = subgroup_by_spec_level(etu, spec, niv, groupe).copy()
 
+        # on supprime Matricule pour éviter l'encombrement
         if "Matricule" in etu_g_raw.columns:
             etu_g_raw = etu_g_raw.drop(columns=["Matricule"])
 
-        base_cols_pref = ["N°", "Nom", "Prenom", "Remarque"]
-        base_cols = [c for c in base_cols_pref if c in etu_g_raw.columns]
-        if not base_cols:
-            base_cols = [c for c in etu_g_raw.columns if c not in {"Spec2","Niv2","Semestre"}][:3]
-
-        etu_g = etu_g_raw[base_cols].reset_index(drop=True)
-
-        if etu_g.empty:
-            st.warning("Pas de liste trouvée pour ce groupe (vérifie 'Groupe' = G11/G12 et 'Semestre' = S1).")
+        # colonnes minimales
+        if "Nom" in etu_g_raw.columns or "Prenom" in etu_g_raw.columns:
+            etu_g_raw["Nom complet"] = (
+                etu_g_raw.get("Nom", "").astype(str).str.strip() + " " +
+                etu_g_raw.get("Prenom", "").astype(str).str.strip()
+            ).str.strip().replace("^\\s+$", "", regex=True)
         else:
-            if "Nom" in etu_g.columns or "Prenom" in etu_g.columns:
-                etu_g["Nom complet"] = (etu_g.get("Nom","").astype(str).str.strip() + " " +
-                                        etu_g.get("Prenom","").astype(str).str.strip()).str.strip()
-            else:
-                first_col = etu_g.columns[0]
-                etu_g["Nom complet"] = etu_g[first_col].astype(str)
+            first_col = etu_g_raw.columns[0] if len(etu_g_raw.columns) else "Etudiant"
+            etu_g_raw["Nom complet"] = etu_g_raw[first_col].astype(str)
 
-            if "Présent" not in etu_g.columns:
-                etu_g["Présent"] = False
+        # initialise l'état global (toute la liste) une seule fois
+        full_key = f"presence_full_{spec}_{niv}_{groupe}"
+        if full_key not in st.session_state:
+            base = etu_g_raw[["Nom complet"]].dropna().drop_duplicates().reset_index(drop=True)
+            base["Présent"] = False
+            base["Remarque"] = ""
+            st.session_state[full_key] = base
 
-            if q_filter:
-                mask = etu_g["Nom complet"].str.contains(q_filter, case=False, na=False)
-                if "Remarque" in etu_g.columns:
-                    mask = mask | etu_g["Remarque"].astype(str).str.contains(q_filter, case=False, na=False)
-                etu_g = etu_g[mask].reset_index(drop=True)
+        # fusionne au cas où une nouvelle liste arrive
+        full_df = st.session_state[full_key]
+        incoming = etu_g_raw[["Nom complet"]].dropna().drop_duplicates().reset_index(drop=True)
+        full_df = incoming.merge(full_df, on="Nom complet", how="left")
+        full_df["Présent"] = full_df["Présent"].fillna(False)
+        full_df["Remarque"] = full_df["Remarque"].fillna("")
+        st.session_state[full_key] = full_df
 
-            if mobile_mode:
-                show_cols = ["Nom complet", "Présent"]
-            else:
-                order = []
-                if "N°" in etu_g.columns: order.append("N°")
-                order += ["Nom complet"]
-                if "Remarque" in etu_g.columns: order.append("Remarque")
-                show_cols = [c for c in order if c in etu_g.columns] + ["Présent"]
+        # filtre par recherche
+        if q_filter:
+            full_df = full_df[full_df["Nom complet"].str.contains(q_filter, case=False, na=False)]
 
-            key_df = f"presence_{spec}_{niv}_{groupe}"
-            if key_df not in st.session_state:
-                st.session_state[key_df] = etu_g.copy()[show_cols]
-            else:
-                missing = [c for c in show_cols if c not in st.session_state[key_df].columns]
-                if missing:
-                    st.session_state[key_df] = etu_g.copy()[show_cols]
-                else:
-                    left = etu_g.copy()[show_cols]
-                    if "Nom complet" in show_cols:
-                        prev = st.session_state[key_df].set_index("Nom complet")
-                        new  = left.set_index("Nom complet")
-                        if "Présent" in prev.columns and "Présent" in new.columns:
-                            new["Présent"] = new.index.map(prev["Présent"]).fillna(False)
-                        st.session_state[key_df] = new.reset_index()
-                    else:
-                        st.session_state[key_df] = left
+        # pagination (évite le scroll sur smartphone)
+        page_key = f"presence_page_{spec}_{niv}_{groupe}"
+        if page_key not in st.session_state:
+            st.session_state[page_key] = 1
+        page = st.session_state[page_key]
 
-            colA, colB, colC = st.columns([1,1,2])
-            with colA:
-                if st.button("✔️ Tout cocher", use_container_width=True):
-                    st.session_state[key_df]["Présent"] = True
-            with colB:
-                if st.button("✖️ Tout décocher", use_container_width=True):
-                    st.session_state[key_df]["Présent"] = False
-            with colC:
-                st.caption("En mode mobile : Nom + case Présent seulement (pas de défilement horizontal).")
+        page_size = st.select_slider(
+            "Taille de page", options=[8, 10, 12, 15, 20], value=12 if mobile_mode else 20,
+            help="Nombre d'étudiants affichés simultanément"
+        )
+        total = len(full_df)
+        max_page = max(1, (total + page_size - 1) // page_size)
+        page = min(page, max_page)
 
-            col_cfg = {
-                "Nom complet": st.column_config.TextColumn("Étudiant", width="large", disabled=True),
-            }
-            if "N°" in show_cols:
-                col_cfg["N°"] = st.column_config.NumberColumn("N°", width="small", disabled=True)
-            if "Remarque" in show_cols:
-                col_cfg["Remarque"] = st.column_config.TextColumn("Remarque", width="medium")
-            if "Présent" in show_cols:
-                col_cfg["Présent"] = st.column_config.CheckboxColumn("Présent", help="Cocher la présence")
+        c1, c2, c3 = st.columns([1, 1, 4])
+        with c1:
+            if st.button("◀️ Précédent", disabled=(page <= 1), use_container_width=True):
+                page = max(1, page - 1)
+        with c2:
+            if st.button("Suivant ▶️", disabled=(page >= max_page), use_container_width=True):
+                page = min(max_page, page + 1)
+        with c3:
+            st.caption(f"Page {page} / {max_page} — {total} étudiants")
 
-            edited = st.data_editor(
-                st.session_state[key_df],
-                column_config=col_cfg,
-                hide_index=True,
-                use_container_width=True,
-                height=520,
-                num_rows="fixed",
-                key=f"editor_{key_df}_{'m' if mobile_mode else 'd'}",
-            )
-            st.session_state[key_df] = edited
+        st.session_state[page_key] = page
+        start, end = (page - 1) * page_size, (page - 1) * page_size + page_size
+        page_df = full_df.iloc[start:end].copy()
 
-            st.download_button(
-                "⬇️ Exporter la présence en Excel",
-                df_to_xlsx_bytes(edited),
-                file_name=f"Presence_{spec}_{niv}_G{groupe}_S1.xlsx",
-                use_container_width=True,
-            )
+        # boutons page : (dé)cocher
+        colA, colB, colC = st.columns([1, 1, 3])
+        with colA:
+            if st.button("✔️ Tout cocher (page)", use_container_width=True):
+                page_df["Présent"] = True
+        with colB:
+            if st.button("✖️ Tout décocher (page)", use_container_width=True):
+                page_df["Présent"] = False
+        with colC:
+            st.caption("En mode mobile : Nom + case Présent + Remarque, sans défilement horizontal.")
+
+        # éditeur compact : Nom + Présent + Remarque
+        col_cfg = {
+            "Nom complet": st.column_config.TextColumn("Étudiant", width="large", disabled=True),
+            "Présent": st.column_config.CheckboxColumn("Présent"),
+            "Remarque": st.column_config.TextColumn("Remarque", width="large"),
+        }
+
+        edited_page = st.data_editor(
+            page_df[["Nom complet", "Présent", "Remarque"]],
+            hide_index=True,
+            use_container_width=True,
+            height=480 if mobile_mode else 520,
+            num_rows="fixed",
+            column_config=col_cfg,
+            key=f"editor_presence_{spec}_{niv}_{groupe}_p{page}",
+        )
+
+        # réinjecte les modifications de la page dans la liste complète
+        full_ref = st.session_state[full_key].set_index("Nom complet")
+        for _, row in edited_page.iterrows():
+            full_ref.loc[row["Nom complet"], "Présent"] = bool(row["Présent"])
+            full_ref.loc[row["Nom complet"], "Remarque"] = str(row["Remarque"] or "")
+        st.session_state[full_key] = full_ref.reset_index()
+
+        # export PDF (avec entête UABT + date & heure)
+        export_df = st.session_state[full_key].copy()
+        export_df = export_df.sort_values("Nom complet").reset_index(drop=True)
+
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+        titre_pdf = f"Feuille de présence — {spec} {pretty_level_label(spec, niv)} • Groupe {groupe} (S1)"
+        meta_pdf  = f"Généré le {ts}"
+
+        header_pdf = {
+            "univ": "UNIVERSITÉ DE TLEMCEN",
+            "fac":  "FACULTÉ DE TECHNOLOGIE",
+            "dept": "DÉPARTEMENT DE GÉNIE CIVIL",
+            "spec": f"Spécialité : {spec} — Niveau : {pretty_level_label(spec, niv)}",
+            "grp":  f"Groupe : {groupe}",
+        }
+
+        pdf_bytes = make_presence_pdf(export_df, titre_pdf, meta_pdf, header=header_pdf)
+        st.download_button(
+            "📄 Exporter la présence en PDF",
+            data=pdf_bytes,
+            file_name=f"Presence_{spec}_{niv}_G{groupe}_S1_{datetime.now():%Y%m%d_%H%M}.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+        )
 
 # ----------------------------- FOOTER ---------------------------------
 
 st.divider()
 st.caption(
     "S1 • Spécialité → Niveau → Groupe • Groupes normalisés (G11/G12) • "
-    "Harmonisation des listes étudiants • Exports uniquement en Excel (.xlsx) • "
-    "Feuille de présence ergonomique sur smartphone (sans Matricule)."
+    "Harmonisation des listes étudiants • Exports EDT/Planning en Excel (.xlsx) • "
+    "Feuille de présence mobile + Remarque • Export PDF officiel."
 )
