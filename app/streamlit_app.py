@@ -1,28 +1,14 @@
 # ======================================================================
 # Portail Génie Civil — EDT & Listes (S1)
-# Fichier unique : app/streamlit_app.py
+# Fichier : app/streamlit_app.py
 # ======================================================================
-# Fonctionnalités :
-# - Profils Étudiant / Enseignant, filtres Spécialité → Niveau → Groupe
+# - Profils Étudiant / Enseignant
+# - Filtres Spécialité → Niveau → Groupe
 # - Normalisation EDT & listes étudiants (S1)
 # - Inférence robuste depuis nom de fichier (2ING, ING2, etc.)
 # - Export Excel uniquement (.xlsx)
 # - Feuille de présence mobile (sans matricule) + Tout cocher / Tout décocher
-# - Panneaux diagnostic (EDT vide + Index des fichiers détectés)
-# - Découverte S1 tolérante : par nom OU par contenu (“Semestre”)
-#
-# Arborescence attendue :
-#   app/
-#     streamlit_app.py
-#     data/
-#       raw/
-#         edt/
-#         students/
-#
-# requirements.txt :
-#   streamlit
-#   pandas
-#   openpyxl
+# - Panneaux diagnostic (désactivable)
 # ======================================================================
 
 from __future__ import annotations
@@ -45,11 +31,11 @@ st.set_page_config(
     layout="wide",
 )
 
-BASE_DIR = Path(__file__).resolve().parent
-RAW_EDT = str(BASE_DIR / "data" / "raw" / "edt")
-RAW_STU = str(BASE_DIR / "data" / "raw" / "students")
-
-SEMESTRE = "S1"  # application mono-semestre
+BASE_DIR   = Path(__file__).resolve().parent
+RAW_EDT    = str(BASE_DIR / "data" / "raw" / "edt")
+RAW_STU    = str(BASE_DIR / "data" / "raw" / "students")
+SEMESTRE   = "S1"                 # application mono-semestre
+SHOW_DIAGNOSTIC = False           # <- mettre True pour réafficher l’expander diagnostic
 
 # Ordres & libellés
 ORDER_JOUR = {
@@ -74,17 +60,43 @@ def inject_css() -> None:
     st.markdown(
         """
         <style>
+          /* Commun */
           h1, h2, h3 { letter-spacing:.2px }
           .actionbar { display:flex; gap:.5rem; flex-wrap:wrap; margin:.25rem 0 1rem }
-          .pill { padding:.35rem .6rem; border-radius:999px; background:#1f2937; font-size:.85rem }
-          .role-etudiant  { background:#0b3b2e; color:#8ef5dd }
-          .role-enseignant{ background:#2a2543; color:#c3b5ff }
-          .stDataFrame table { font-size: 0.92rem }
-          .card { background:#0f1624; border:1px solid #1f2937; padding:1rem; border-radius:12px; margin: .25rem 0 .75rem }
-          .muted{ color:#9ca3af; font-size:.9rem }
-          .badge { padding:.15rem .45rem; border-radius:8px; background:#1f2937; font-size:.78rem; margin-left:.35rem }
-          .sticky { position:sticky; top:0; z-index:9; background:transparent; padding-top:.25rem }
+          .pill { padding:.38rem .65rem; border-radius:999px; font-size:.86rem; font-weight:600; border:1px solid transparent; }
+          .badge { padding:.12rem .45rem; border-radius:8px; font-size:.78rem; margin-left:.35rem; border:1px solid transparent; font-weight:600; }
+          .card  { border:1px solid transparent; padding:1rem; border-radius:12px; margin:.25rem 0 .75rem; }
+          .muted{ opacity:.85; font-size:.92rem }
+          .next-title { font-size:1.1rem; font-weight:700; }
+
+          /* Sombre */
+          @media (prefers-color-scheme: dark) {
+            .pill { background:#1f2937; color:#e5e7eb; border-color:#374151; }
+            .role-etudiant  { background:#0e3c2e; color:#a7f3d0; border-color:#065f46; }
+            .role-enseignant{ background:#2b2547; color:#c7d2fe; border-color:#4338ca; }
+
+            .card { background:#0f1624; border-color:#1f2937; }
+            .badge { background:#1f2937; color:#e5e7eb; border-color:#374151; }
+
+            .next-title { color:#e5e7eb; }
+          }
+
+          /* Clair */
+          @media (prefers-color-scheme: light) {
+            .pill { background:#eef2ff; color:#1f2937; border-color:#c7d2fe; }
+            .role-etudiant  { background:#dcfce7; color:#064e3b; border-color:#86efac; }
+            .role-enseignant{ background:#e0e7ff; color:#312e81; border-color:#a5b4fc; }
+
+            .card { background:#f8fafc; border-color:#e5e7eb; }
+            .badge { background:#f1f5f9; color:#111827; border-color:#e5e7eb; }
+
+            .next-title { color:#111827; }
+          }
+
+          /* Data Editor (présence) */
           [data-testid="stDataEditorContainer"] { border-radius: 12px; }
+          [data-testid="stDataEditorRow"] { min-height: 40px; }
+          [data-testid="column-Nom complet"] div { white-space: normal !important; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -94,13 +106,11 @@ def header_role(role_label: str, subtitle: str) -> None:
     role_class = "role-etudiant" if role_label == "Étudiant" else "role-enseignant"
     st.markdown(
         f"""
-        <div class="sticky">
-          <div class="actionbar">
-            <span class="pill {role_class}">
-              {"👩‍🎓 Étudiant" if role_label == "Étudiant" else "👨‍🏫 Enseignant"}
-            </span>
-            <span class="pill">{subtitle}</span>
-          </div>
+        <div class="actionbar">
+          <span class="pill {role_class}">
+            {"👩‍🎓 Étudiant" if role_label == "Étudiant" else "👨‍🏫 Enseignant"}
+          </span>
+          <span class="pill">{subtitle}</span>
         </div>
         """,
         unsafe_allow_html=True,
@@ -135,11 +145,9 @@ def time_to_minutes(h: Any) -> Optional[int]:
         return None
 
 def minutes_to_dt(d: datetime, minutes: int) -> datetime:
-    """Combine la date d et des minutes depuis minuit → datetime."""
     return datetime.combine(d.date(), dtime.min) + timedelta(minutes=minutes)
 
 def human_delta(dt: datetime, now: datetime) -> str:
-    """Délai lisible '1j 2h 30m'."""
     s = int((dt - now).total_seconds())
     d = s // 86400; s %= 86400
     h = s // 3600; s %= 3600
@@ -149,35 +157,9 @@ def human_delta(dt: datetime, now: datetime) -> str:
     if h: out.append(f"{h}h")
     if m: out.append(f"{m}m")
     return " ".join(out) or "0m"
-
-def next_session(now: datetime, edt_df: pd.DataFrame) -> Optional[Tuple[datetime, pd.Series]]:
-    """Prochaine séance dans un EDT hebdomadaire."""
-    if edt_df.empty:
-        return None
-    py_day = {"LUNDI":0,"MARDI":1,"MERCREDI":2,"JEUDI":3,"VENDREDI":4,"SAMEDI":5,"DIMANCHE":6}
-    today_idx = now.weekday()
-    rows = []
-    for _, r in edt_df.iterrows():
-        d_idx = py_day.get(str(r["Jour"]).upper(), None)
-        if d_idx is None:
-            continue
-        m = time_to_minutes(r["Heure début"])
-        if m is None:
-            continue
-        delta = (d_idx - today_idx) % 7
-        dt = datetime.combine((now + timedelta(days=delta)).date(), dtime.min) + timedelta(minutes=m)
-        if dt < now:
-            dt += timedelta(days=7)
-        rows.append((dt, r))
-    if not rows:
-        return None
-    rows.sort(key=lambda x: x[0])
-    return rows[0]
-
 # --------------------- NORMALISATION & INFERENCE ----------------------
 
 def ensure_cols(df: pd.DataFrame, cols: Iterable[str], numeric: Iterable[str] = ()) -> pd.DataFrame:
-    """Garantit un set minimal de colonnes (valeurs vides si manquantes)."""
     numeric = set(numeric or [])
     for c in cols:
         if c not in df.columns:
@@ -197,7 +179,6 @@ def normalize_groupe(val: Any) -> str:
     return s
 
 def classify_spec_level(spec_text: str, level_text: str) -> Tuple[str, str]:
-    """Détecte (Spécialité, Niveau) à partir des champs libres."""
     S = (spec_text or "").upper()
     L = (level_text or "").upper()
     if "RIB" in S:        return "RIB",        "M1" if "M1" in S+L else ("M2" if "M2" in S+L else "")
@@ -211,17 +192,12 @@ def classify_spec_level(spec_text: str, level_text: str) -> Tuple[str, str]:
         if "3" in S+L: return "INGENIEUR", "3"
         return "INGENIEUR", ""
     return "", ""
+
 # ----------------- INFÉRENCE MÉTA DEPUIS LE NOM DU FICHIER ------------
 
 def infer_from_filename(path: str) -> Tuple[Optional[str], Optional[str], Optional[str], str]:
-    """
-    Infère (Spec2, Niv2, Groupe, Semestre) depuis le nom du fichier.
-    Compatible avec : 2ING, ING2, ING_2, ING-2, 2-ING, INGENIEUR2, etc.
-    Groupes : G11, _G11, -G11, G 11
-    Semestre : S1, _S1, S 1
-    """
     name = Path(path).stem.upper()
-    name_compact = re.sub(r"[\s\-]+", "_", name)  # espaces/tirets -> _
+    name_compact = re.sub(r"[\s\-]+", "_", name)
     name_nospace = re.sub(r"\s+", "", name)
 
     # Groupe
@@ -256,21 +232,18 @@ def infer_from_filename(path: str) -> Tuple[Optional[str], Optional[str], Option
     if m:
         return "LICENCE", m.group(1), g, (sem or "S1")
 
-    # INGENIEUR 1/2/3 (toutes formes)
+    # INGENIEUR 1/2/3
     m = re.search(r"(?:INGENIEUR|ING)[_\- ]?([123])", name_compact)
     if not m:
         m = re.search(r"([123])[_\- ]?(?:INGENIEUR|ING)", name_compact)
     if m:
         return "INGENIEUR", m.group(1), g, (sem or "S1")
 
-    # Par défaut
     return None, None, g, (sem or "S1")
-
 
 # ------------------ HARMONISATION LISTES ÉTUDIANTS --------------------
 
 def harmonize_student_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Renomme les colonnes variées vers le schéma standard + split Nom/Prénom si besoin."""
     mapping: Dict[str, str] = {}
     for c in df.columns:
         k = str(c).strip().lower()
@@ -311,18 +284,11 @@ def harmonize_student_columns(df: pd.DataFrame) -> pd.DataFrame:
             df[col] = df[col].astype(str).str.strip()
     return df
 
-
 # ------------------ CHARGEMENT ET MISE EN FORME (PATCHÉ) --------------
 
 @st.cache_data
 def load_raw_s1() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """
-    Charge TOUS les fichiers, puis garde S1 si :
-      - le NOM du fichier contient 'S1' (insensible à la casse), OU
-      - la COLONNE 'Semestre' contient 'S1'.
-    Retourne: (edt, etu, idx) où idx = index de fichiers détectés (diagnostic).
-    """
-    idx_rows = []  # lignes diagnostic
+    idx_rows = []
 
     # ----------------------------- EDT ---------------------------------
     edt_frames = []
@@ -333,59 +299,46 @@ def load_raw_s1() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         try:
             df = read_any(f)
         except Exception as e:
-            idx_rows.append({
-                "Type": "EDT", "Fichier": fname, "Lu": False,
-                "Erreur": str(e), "S1_par_nom": "S1" in name_up, "S1_par_col": None,
-                "Spec2": None, "Niv2": None, "Groupe": None
-            })
+            idx_rows.append({"Type":"EDT","Fichier":fname,"Lu":False,"Erreur":str(e),
+                             "S1_par_nom":"S1" in name_up,"S1_par_col":None,
+                             "Spec2":None,"Niv2":None,"Groupe":None})
             continue
 
         df = ensure_cols(df, EDT_COLS, numeric=["Durée (h)"])
         df["Semestre"] = df["Semestre"].apply(normalize_semestre)
-        df["Groupe"] = df["Groupe"].apply(normalize_groupe)
+        df["Groupe"]   = df["Groupe"].apply(normalize_groupe)
 
         has_s1_col = df["Semestre"].astype(str).str.upper().eq("S1").any()
         s1_by_name = "S1" in name_up
         if not (s1_by_name or has_s1_col):
-            idx_rows.append({
-                "Type": "EDT", "Fichier": fname, "Lu": True,
-                "Erreur": "", "S1_par_nom": s1_by_name, "S1_par_col": has_s1_col,
-                "Spec2": None, "Niv2": None, "Groupe": None
-            })
+            idx_rows.append({"Type":"EDT","Fichier":fname,"Lu":True,"Erreur":"",
+                             "S1_par_nom":s1_by_name,"S1_par_col":has_s1_col,
+                             "Spec2":None,"Niv2":None,"Groupe":None})
             continue
 
-        # --- Classification initiale depuis colonnes libres
-        specs, nivs = zip(*df.apply(
-            lambda r: classify_spec_level(r.get("Spécialité",""), r.get("Niveau","")),
-            axis=1
-        ))
+        specs, nivs = zip(*df.apply(lambda r: classify_spec_level(r.get("Spécialité",""),
+                                                                  r.get("Niveau","")), axis=1))
         df["Spec2"], df["Niv2"] = specs, nivs
 
-        # --- INFÉRENCE + FORÇAGE GLOBAL depuis NOM DE FICHIER (PATCH)
+        # --- INFÉRENCE + FORÇAGE GLOBAL (PATCH)
         s2_f, n2_f, g_f, sem_f = infer_from_filename(f)
-        df["Spec2"]   = df["Spec2"].fillna("").astype(str).str.upper()
-        df["Niv2"]    = df["Niv2"].fillna("").astype(str).str.upper()
-        df["Groupe"]  = df["Groupe"].fillna("").astype(str)
-        df["Semestre"]= df["Semestre"].fillna("").astype(str).str.upper()
+        df["Spec2"]    = df["Spec2"].fillna("").astype(str).str.upper()
+        df["Niv2"]     = df["Niv2"].fillna("").astype(str).str.upper()
+        df["Groupe"]   = df["Groupe"].fillna("").astype(str)
+        df["Semestre"] = df["Semestre"].fillna("").astype(str).str.upper()
         if s2_f:  df["Spec2"]    = s2_f
         if n2_f:  df["Niv2"]     = n2_f
         if g_f:   df["Groupe"]   = normalize_groupe(g_f)
         if sem_f: df["Semestre"] = sem_f
 
-        # --- Index diag
         idx_rows.append({
-            "Type": "EDT",
-            "Fichier": fname,
-            "Lu": True,
-            "Erreur": "",
-            "S1_par_nom": s1_by_name,
-            "S1_par_col": has_s1_col,
-            "Spec2": df["Spec2"].dropna().astype(str).str.upper().replace("", None).mode().tolist()[:1] or [None],
-            "Niv2": df["Niv2"].dropna().astype(str).str.upper().replace("", None).mode().tolist()[:1] or [None],
-            "Groupe": df["Groupe"].dropna().map(normalize_groupe).mode().tolist()[:1] or [None],
+            "Type":"EDT","Fichier":fname,"Lu":True,"Erreur":"",
+            "S1_par_nom":s1_by_name,"S1_par_col":has_s1_col,
+            "Spec2":df["Spec2"].dropna().astype(str).str.upper().replace("",None).mode().tolist()[:1] or [None],
+            "Niv2": df["Niv2"].dropna().astype(str).str.upper().replace("",None).mode().tolist()[:1] or [None],
+            "Groupe":df["Groupe"].dropna().map(normalize_groupe).mode().tolist()[:1] or [None],
         })
 
-        # Ne garde que S1
         df = df[df["Semestre"].astype(str).str.upper() == "S1"].copy()
         edt_frames.append(df)
 
@@ -405,55 +358,45 @@ def load_raw_s1() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         try:
             df = read_any(f)
         except Exception as e:
-            idx_rows.append({
-                "Type": "ETU", "Fichier": fname, "Lu": False,
-                "Erreur": str(e), "S1_par_nom": "S1" in name_up, "S1_par_col": None,
-                "Spec2": None, "Niv2": None, "Groupe": None
-            })
+            idx_rows.append({"Type":"ETU","Fichier":fname,"Lu":False,"Erreur":str(e),
+                             "S1_par_nom":"S1" in name_up,"S1_par_col":None,
+                             "Spec2":None,"Niv2":None,"Groupe":None})
             continue
 
         df = harmonize_student_columns(df)
         df = ensure_cols(df, STU_COLS)
         df["Semestre"] = df["Semestre"].apply(normalize_semestre)
-        df["Groupe"] = df["Groupe"].apply(normalize_groupe)
+        df["Groupe"]   = df["Groupe"].apply(normalize_groupe)
 
         has_s1_col = df["Semestre"].astype(str).str.upper().eq("S1").any()
         s1_by_name = "S1" in name_up
         if not (s1_by_name or has_s1_col):
-            idx_rows.append({
-                "Type": "ETU", "Fichier": fname, "Lu": True,
-                "Erreur": "", "S1_par_nom": s1_by_name, "S1_par_col": has_s1_col,
-                "Spec2": None, "Niv2": None, "Groupe": None
-            })
+            idx_rows.append({"Type":"ETU","Fichier":fname,"Lu":True,"Erreur":"",
+                             "S1_par_nom":s1_by_name,"S1_par_col":has_s1_col,
+                             "Spec2":None,"Niv2":None,"Groupe":None})
             continue
 
-        specs, nivs = zip(*df.apply(
-            lambda r: classify_spec_level(r.get("Spécialité",""), r.get("Niveau","")),
-            axis=1
-        ))
+        specs, nivs = zip(*df.apply(lambda r: classify_spec_level(r.get("Spécialité",""),
+                                                                  r.get("Niveau","")), axis=1))
         df["Spec2"], df["Niv2"] = specs, nivs
 
-        # --- INFÉRENCE + FORÇAGE GLOBAL depuis NOM DE FICHIER (PATCH)
+        # --- INFÉRENCE + FORÇAGE GLOBAL (PATCH)
         s2_f, n2_f, g_f, sem_f = infer_from_filename(f)
-        df["Spec2"]   = df["Spec2"].fillna("").astype(str).str.upper()
-        df["Niv2"]    = df["Niv2"].fillna("").astype(str).str.upper()
-        df["Groupe"]  = df["Groupe"].fillna("").astype(str)
-        df["Semestre"]= df["Semestre"].fillna("").astype(str).str.upper()
+        df["Spec2"]    = df["Spec2"].fillna("").astype(str).str.upper()
+        df["Niv2"]     = df["Niv2"].fillna("").astype(str).str.upper()
+        df["Groupe"]   = df["Groupe"].fillna("").astype(str)
+        df["Semestre"] = df["Semestre"].fillna("").astype(str).str.upper()
         if s2_f:  df["Spec2"]    = s2_f
         if n2_f:  df["Niv2"]     = n2_f
         if g_f:   df["Groupe"]   = normalize_groupe(g_f)
         if sem_f: df["Semestre"] = sem_f
 
         idx_rows.append({
-            "Type": "ETU",
-            "Fichier": fname,
-            "Lu": True,
-            "Erreur": "",
-            "S1_par_nom": s1_by_name,
-            "S1_par_col": has_s1_col,
-            "Spec2": df["Spec2"].dropna().astype(str).str.upper().replace("", None).mode().tolist()[:1] or [None],
-            "Niv2": df["Niv2"].dropna().astype(str).str.upper().replace("", None).mode().tolist()[:1] or [None],
-            "Groupe": df["Groupe"].dropna().map(normalize_groupe).mode().tolist()[:1] or [None],
+            "Type":"ETU","Fichier":fname,"Lu":True,"Erreur":"",
+            "S1_par_nom":s1_by_name,"S1_par_col":has_s1_col,
+            "Spec2":df["Spec2"].dropna().astype(str).str.upper().replace("",None).mode().tolist()[:1] or [None],
+            "Niv2": df["Niv2"].dropna().astype(str).str.upper().replace("",None).mode().tolist()[:1] or [None],
+            "Groupe":df["Groupe"].dropna().map(normalize_groupe).mode().tolist()[:1] or [None],
         })
 
         df = df[df["Semestre"].astype(str).str.upper() == "S1"].copy()
@@ -499,15 +442,16 @@ st.title("🗓️ Portail Génie Civil — EDT & Listes (S1)")
 
 edt, etu, idx = load_raw_s1()
 
-# ---- Index de détection (diagnostic complet)
-with st.expander("📂 Index des fichiers détectés (diagnostic)", expanded=False):
-    if idx.empty:
-        st.info("Aucun fichier détecté dans `data/raw/edt/` et `data/raw/students/`.")
-    else:
-        st.dataframe(
-            idx[["Type","Fichier","Lu","S1_par_nom","S1_par_col","Spec2","Niv2","Groupe","Erreur"]],
-            hide_index=True, use_container_width=True
-        )
+# ---- Index de détection (diagnostic complet) — masqué par défaut
+if SHOW_DIAGNOSTIC:
+    with st.expander("📂 Index des fichiers détectés (diagnostic)", expanded=False):
+        if idx.empty:
+            st.info("Aucun fichier détecté dans `data/raw/edt/` et `data/raw/students/`.")
+        else:
+            st.dataframe(
+                idx[["Type","Fichier","Lu","S1_par_nom","S1_par_col","Spec2","Niv2","Groupe","Erreur"]],
+                hide_index=True, use_container_width=True
+            )
 
 if edt.empty:
     st.error("Aucun EDT S1 trouvé ou reconnu.")
@@ -559,7 +503,7 @@ if print_mode:
 bloc = subgroup_by_spec_level(edt, spec, niv, groupe)
 
 # 🔍 Diagnostic si EDT vide pour les filtres actuels
-if bloc.empty:
+if bloc.empty and SHOW_DIAGNOSTIC:
     with st.expander("🔍 Diagnostic (EDT vide pour ce filtre)", expanded=False):
         df_spec = edt[edt["Spec2"] == spec]
         st.write("Niveaux disponibles pour", spec, ":", sorted(df_spec["Niv2"].dropna().unique().tolist()))
@@ -591,13 +535,33 @@ if role == "Étudiant":
 
     with tab_next:
         st.markdown("#### À venir")
-        nxt = next_session(now, bloc)
+        def next_session(df: pd.DataFrame) -> Optional[Tuple[datetime, pd.Series]]:
+            if df.empty:
+                return None
+            py_day = {"LUNDI":0,"MARDI":1,"MERCREDI":2,"JEUDI":3,"VENDREDI":4,"SAMEDI":5,"DIMANCHE":6}
+            today_idx = now.weekday()
+            rows = []
+            for _, r in df.iterrows():
+                d_idx = py_day.get(str(r["Jour"]).upper(), None)
+                if d_idx is None: continue
+                m = time_to_minutes(r["Heure début"])
+                if m is None: continue
+                delta = (d_idx - today_idx) % 7
+                dt = datetime.combine((now + timedelta(days=delta)).date(), dtime.min) + timedelta(minutes=m)
+                if dt < now:
+                    dt += timedelta(days=7)
+                rows.append((dt, r))
+            if not rows: return None
+            rows.sort(key=lambda x: x[0])
+            return rows[0]
+
+        nxt = next_session(bloc)
         if nxt:
             dt, r = nxt
             st.markdown(
                 f"""
                 <div class="card">
-                  <div style="font-size:1.1rem;font-weight:600">{r['Matière']} <span class="badge">{r['Type']}</span></div>
+                  <div class="next-title">{r['Matière']} <span class="badge">{r['Type']}</span></div>
                   <div class="muted">
                     {r['Jour']} • {r['Heure début']}–{r['Heure fin']}
                     <span class="badge">Salle {r['Salle']}</span>
@@ -636,13 +600,33 @@ else:
 
     with tab_next:
         st.markdown("#### Ma prochaine séance")
-        nxt = next_session(now, bloc)
+        # réutilise next_session défini ci-dessus (Étudiant)
+        nxt = (lambda df: (None if df.empty else __import__("builtins")))(bloc)  # no-op to keep linter calm
+        # petite redéfinition locale pour éviter dépendance
+        def _next(df: pd.DataFrame) -> Optional[Tuple[datetime, pd.Series]]:
+            if df.empty: return None
+            py = {"LUNDI":0,"MARDI":1,"MERCREDI":2,"JEUDI":3,"VENDREDI":4,"SAMEDI":5,"DIMANCHE":6}
+            today = now.weekday()
+            rows=[]
+            for _, r in df.iterrows():
+                d = py.get(str(r["Jour"]).upper(), None)
+                if d is None: continue
+                m = time_to_minutes(r["Heure début"]); 
+                if m is None: continue
+                delta = (d - today) % 7
+                dt = datetime.combine((now + timedelta(days=delta)).date(), dtime.min) + timedelta(minutes=m)
+                if dt < now: dt += timedelta(days=7)
+                rows.append((dt, r))
+            if not rows: return None
+            rows.sort(key=lambda x:x[0]); return rows[0]
+        nxt = _next(bloc)
+
         if nxt:
             dt, r = nxt
             st.markdown(
                 f"""
                 <div class="card">
-                  <div style="font-size:1.1rem;font-weight:600">{r['Matière']} <span class="badge">{r['Type']}</span></div>
+                  <div class="next-title">{r['Matière']} <span class="badge">{r['Type']}</span></div>
                   <div class="muted">
                     {r['Jour']} • {r['Heure début']}–{r['Heure fin']}
                     <span class="badge">Salle {r['Salle']}</span>
@@ -740,25 +724,20 @@ else:
                 st.dataframe(df_where.drop(columns=["_order0","_order1"]),
                              use_container_width=True, hide_index=True)
 
-    # ---- Feuille de présence (enseignant) — version mobile friendly
+    # ---- Feuille de présence (enseignant) — mobile friendly
     with tab_presence:
         st.markdown("#### Feuille de présence (enseignant)")
 
-        # Affichage compact pour smartphone
         mobile_mode = st.toggle("📱 Mode mobile (affichage compact)", value=True,
                                 help="Affiche seulement Nom et Présent (idéal sur smartphone)")
 
-        # Recherche rapide
         q_filter = st.text_input("🔎 Recherche rapide (Nom/Prénom) :", value="").strip()
 
-        # Charge la liste harmonisée pour le groupe
         etu_g_raw = subgroup_by_spec_level(etu, spec, niv, groupe).copy()
 
-        # Supprimer Matricule s’il existe (écran + export)
         if "Matricule" in etu_g_raw.columns:
             etu_g_raw = etu_g_raw.drop(columns=["Matricule"])
 
-        # Colonnes de base : privilégier N°, Nom, Prenom, Remarque
         base_cols_pref = ["N°", "Nom", "Prenom", "Remarque"]
         base_cols = [c for c in base_cols_pref if c in etu_g_raw.columns]
         if not base_cols:
@@ -769,7 +748,6 @@ else:
         if etu_g.empty:
             st.warning("Pas de liste trouvée pour ce groupe (vérifie 'Groupe' = G11/G12 et 'Semestre' = S1).")
         else:
-            # Colonne Nom complet
             if "Nom" in etu_g.columns or "Prenom" in etu_g.columns:
                 etu_g["Nom complet"] = (etu_g.get("Nom","").astype(str).str.strip() + " " +
                                         etu_g.get("Prenom","").astype(str).str.strip()).str.strip()
@@ -777,18 +755,15 @@ else:
                 first_col = etu_g.columns[0]
                 etu_g["Nom complet"] = etu_g[first_col].astype(str)
 
-            # Ajoute "Présent" si absente
             if "Présent" not in etu_g.columns:
                 etu_g["Présent"] = False
 
-            # Filtre texte
             if q_filter:
                 mask = etu_g["Nom complet"].str.contains(q_filter, case=False, na=False)
                 if "Remarque" in etu_g.columns:
                     mask = mask | etu_g["Remarque"].astype(str).str.contains(q_filter, case=False, na=False)
                 etu_g = etu_g[mask].reset_index(drop=True)
 
-            # Jeu de colonnes final selon le mode
             if mobile_mode:
                 show_cols = ["Nom complet", "Présent"]
             else:
@@ -798,17 +773,14 @@ else:
                 if "Remarque" in etu_g.columns: order.append("Remarque")
                 show_cols = [c for c in order if c in etu_g.columns] + ["Présent"]
 
-            # État en session (conserve cases cochées)
             key_df = f"presence_{spec}_{niv}_{groupe}"
             if key_df not in st.session_state:
                 st.session_state[key_df] = etu_g.copy()[show_cols]
             else:
-                # Ré-aligner si colonnes changent (toggle mobile)
                 missing = [c for c in show_cols if c not in st.session_state[key_df].columns]
                 if missing:
                     st.session_state[key_df] = etu_g.copy()[show_cols]
                 else:
-                    # Conserver Présent par "Nom complet"
                     left = etu_g.copy()[show_cols]
                     if "Nom complet" in show_cols:
                         prev = st.session_state[key_df].set_index("Nom complet")
@@ -819,7 +791,6 @@ else:
                     else:
                         st.session_state[key_df] = left
 
-            # Actions rapides
             colA, colB, colC = st.columns([1,1,2])
             with colA:
                 if st.button("✔️ Tout cocher", use_container_width=True):
@@ -830,7 +801,6 @@ else:
             with colC:
                 st.caption("En mode mobile : Nom + case Présent seulement (pas de défilement horizontal).")
 
-            # Config colonnes
             col_cfg = {
                 "Nom complet": st.column_config.TextColumn("Étudiant", width="large", disabled=True),
             }
@@ -852,21 +822,12 @@ else:
             )
             st.session_state[key_df] = edited
 
-            # Export Excel (sans Matricule)
             st.download_button(
                 "⬇️ Exporter la présence en Excel",
                 df_to_xlsx_bytes(edited),
                 file_name=f"Presence_{spec}_{niv}_G{groupe}_S1.xlsx",
                 use_container_width=True,
             )
-
-            # CSS lisibilité mobile
-            st.markdown("""
-                <style>
-                [data-testid="stDataEditorRow"] { min-height: 40px; }
-                [data-testid="column-Nom complet"] div { white-space: normal !important; }
-                </style>
-            """, unsafe_allow_html=True)
 
 # ----------------------------- FOOTER ---------------------------------
 
