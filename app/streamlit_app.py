@@ -2,12 +2,12 @@
 # Portail Génie Civil — EDT & Listes (S1)
 # Fichier unique : app/streamlit_app.py
 # ======================================================================
-# Points clés :
-# - Profils Étudiant / Enseignant, filtres hiérarchiques Spécialité → Niveau → Groupe
-# - Normalisation des EDT & listes étudiants (S1)
-# - Inférence robuste depuis nom de fichier (ING2, 2-ING, ING_2, etc.)
+# Fonctionnalités :
+# - Profils Étudiant / Enseignant, filtres Spécialité → Niveau → Groupe
+# - Normalisation EDT & listes étudiants (S1)
+# - Inférence robuste depuis nom de fichier (2ING, ING2, etc.)
 # - Export Excel uniquement (.xlsx)
-# - Feuille de présence mobile (sans matricule) avec Tout cocher / Tout décocher
+# - Feuille de présence mobile (sans matricule) + Tout cocher / Tout décocher
 # - Panneaux diagnostic (EDT vide + Index des fichiers détectés)
 # - Découverte S1 tolérante : par nom OU par contenu (“Semestre”)
 #
@@ -16,8 +16,8 @@
 #     streamlit_app.py
 #     data/
 #       raw/
-#         edt/        ← fichiers EDT *_S1.{xlsx,csv} (ou fichier multi-semestres avec col Semestre=S1)
-#         students/   ← fichiers listes *_S1.{xlsx,csv}
+#         edt/
+#         students/
 #
 # requirements.txt :
 #   streamlit
@@ -211,7 +211,8 @@ def classify_spec_level(spec_text: str, level_text: str) -> Tuple[str, str]:
         if "3" in S+L: return "INGENIEUR", "3"
         return "INGENIEUR", ""
     return "", ""
-# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>  NOUVELLE  <<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+# ----------------- INFÉRENCE MÉTA DEPUIS LE NOM DU FICHIER ------------
+
 def infer_from_filename(path: str) -> Tuple[Optional[str], Optional[str], Optional[str], str]:
     """
     Infère (Spec2, Niv2, Groupe, Semestre) depuis le nom du fichier.
@@ -264,7 +265,6 @@ def infer_from_filename(path: str) -> Tuple[Optional[str], Optional[str], Option
 
     # Par défaut
     return None, None, g, (sem or "S1")
-# >>>>>>>>>>>>>>>>>>>>>>>>>>  FIN NOUVELLE  <<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
 
 # ------------------ HARMONISATION LISTES ÉTUDIANTS --------------------
@@ -312,20 +312,19 @@ def harmonize_student_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ------------------ CHARGEMENT ET MISE EN FORME (NOUVEAU) --------------
+# ------------------ CHARGEMENT ET MISE EN FORME (PATCHÉ) --------------
 
 @st.cache_data
 def load_raw_s1() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
-    Charge TOUS les fichiers du dossier, puis garde S1 si :
-      - le nom du fichier contient 'S1' (insensible à la casse), OU
-      - la colonne 'Semestre' contient 'S1'.
+    Charge TOUS les fichiers, puis garde S1 si :
+      - le NOM du fichier contient 'S1' (insensible à la casse), OU
+      - la COLONNE 'Semestre' contient 'S1'.
     Retourne: (edt, etu, idx) où idx = index de fichiers détectés (diagnostic).
     """
-    # -------------------- INDEX DIAGNOSTIC (par fichier) --------------------
-    idx_rows = []  # on y mettra une ligne par fichier analysé
+    idx_rows = []  # lignes diagnostic
 
-    # ----------------------------- EDT -------------------------------------
+    # ----------------------------- EDT ---------------------------------
     edt_frames = []
     for f in sorted(glob.glob(f"{RAW_EDT}/*.*")):
         fname = Path(f).name
@@ -341,16 +340,12 @@ def load_raw_s1() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
             })
             continue
 
-        # Harmonisation minimale
         df = ensure_cols(df, EDT_COLS, numeric=["Durée (h)"])
         df["Semestre"] = df["Semestre"].apply(normalize_semestre)
         df["Groupe"] = df["Groupe"].apply(normalize_groupe)
 
-        # Détection S1 par la colonne
         has_s1_col = df["Semestre"].astype(str).str.upper().eq("S1").any()
         s1_by_name = "S1" in name_up
-
-        # Si ni le nom ni la colonne ne donnent S1, on ignore ce fichier
         if not (s1_by_name or has_s1_col):
             idx_rows.append({
                 "Type": "EDT", "Fichier": fname, "Lu": True,
@@ -359,22 +354,25 @@ def load_raw_s1() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
             })
             continue
 
-        # Spécialité/Niveau depuis colonnes libres
+        # --- Classification initiale depuis colonnes libres
         specs, nivs = zip(*df.apply(
             lambda r: classify_spec_level(r.get("Spécialité",""), r.get("Niveau","")),
             axis=1
         ))
         df["Spec2"], df["Niv2"] = specs, nivs
 
-        # Si besoin, inférence depuis le nom du fichier
-        if (df["Spec2"] == "").any() or (df["Niv2"] == "").any() or (df["Groupe"] == "").any():
-            s2_f, n2_f, g_f, sem_f = infer_from_filename(f)
-            if s2_f:  df.loc[df["Spec2"] == "", "Spec2"] = s2_f
-            if n2_f:  df.loc[df["Niv2"] == "", "Niv2"] = n2_f
-            if g_f:   df.loc[df["Groupe"] == "", "Groupe"] = normalize_groupe(g_f)
-            if sem_f: df.loc[df["Semestre"] == "", "Semestre"] = sem_f
+        # --- INFÉRENCE + FORÇAGE GLOBAL depuis NOM DE FICHIER (PATCH)
+        s2_f, n2_f, g_f, sem_f = infer_from_filename(f)
+        df["Spec2"]   = df["Spec2"].fillna("").astype(str).str.upper()
+        df["Niv2"]    = df["Niv2"].fillna("").astype(str).str.upper()
+        df["Groupe"]  = df["Groupe"].fillna("").astype(str)
+        df["Semestre"]= df["Semestre"].fillna("").astype(str).str.upper()
+        if s2_f:  df["Spec2"]    = s2_f
+        if n2_f:  df["Niv2"]     = n2_f
+        if g_f:   df["Groupe"]   = normalize_groupe(g_f)
+        if sem_f: df["Semestre"] = sem_f
 
-        # Pour l’index, on retient un échantillon des méta détectées
+        # --- Index diag
         idx_rows.append({
             "Type": "EDT",
             "Fichier": fname,
@@ -387,7 +385,7 @@ def load_raw_s1() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
             "Groupe": df["Groupe"].dropna().map(normalize_groupe).mode().tolist()[:1] or [None],
         })
 
-        # Et on ne garde que S1 dans le contenu
+        # Ne garde que S1
         df = df[df["Semestre"].astype(str).str.upper() == "S1"].copy()
         edt_frames.append(df)
 
@@ -398,7 +396,7 @@ def load_raw_s1() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     else:
         edt = pd.DataFrame(columns=EDT_COLS + ["Spec2","Niv2"])
 
-    # --------------------------- ETUDIANTS ----------------------------------
+    # --------------------------- ETUDIANTS -------------------------------
     stu_frames = []
     for f in sorted(glob.glob(f"{RAW_STU}/*.*")):
         fname = Path(f).name
@@ -435,12 +433,16 @@ def load_raw_s1() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         ))
         df["Spec2"], df["Niv2"] = specs, nivs
 
-        if (df["Spec2"] == "").any() or (df["Niv2"] == "").any() or (df["Groupe"] == "").any():
-            s2_f, n2_f, g_f, sem_f = infer_from_filename(f)
-            if s2_f:  df.loc[df["Spec2"] == "", "Spec2"] = s2_f
-            if n2_f:  df.loc[df["Niv2"] == "", "Niv2"] = n2_f
-            if g_f:   df.loc[df["Groupe"] == "", "Groupe"] = normalize_groupe(g_f)
-            if sem_f: df.loc[df["Semestre"] == "", "Semestre"] = sem_f
+        # --- INFÉRENCE + FORÇAGE GLOBAL depuis NOM DE FICHIER (PATCH)
+        s2_f, n2_f, g_f, sem_f = infer_from_filename(f)
+        df["Spec2"]   = df["Spec2"].fillna("").astype(str).str.upper()
+        df["Niv2"]    = df["Niv2"].fillna("").astype(str).str.upper()
+        df["Groupe"]  = df["Groupe"].fillna("").astype(str)
+        df["Semestre"]= df["Semestre"].fillna("").astype(str).str.upper()
+        if s2_f:  df["Spec2"]    = s2_f
+        if n2_f:  df["Niv2"]     = n2_f
+        if g_f:   df["Groupe"]   = normalize_groupe(g_f)
+        if sem_f: df["Semestre"] = sem_f
 
         idx_rows.append({
             "Type": "ETU",
@@ -459,7 +461,7 @@ def load_raw_s1() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
 
     etu = pd.concat(stu_frames, ignore_index=True) if stu_frames else pd.DataFrame(columns=STU_COLS + ["Spec2","Niv2"])
 
-    # --------------------- TABLE D’INDEX (pour affichage) -------------------
+    # --------------------- TABLE D’INDEX (affichage) -------------------
     idx = pd.DataFrame(idx_rows)
     for c in ["Spec2","Niv2","Groupe"]:
         if c in idx.columns:
@@ -497,7 +499,7 @@ st.title("🗓️ Portail Génie Civil — EDT & Listes (S1)")
 
 edt, etu, idx = load_raw_s1()
 
-# ---- Diagnostic d’index (ce que l’appli voit exactement)
+# ---- Index de détection (diagnostic complet)
 with st.expander("📂 Index des fichiers détectés (diagnostic)", expanded=False):
     if idx.empty:
         st.info("Aucun fichier détecté dans `data/raw/edt/` et `data/raw/students/`.")
