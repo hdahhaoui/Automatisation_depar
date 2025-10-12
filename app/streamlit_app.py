@@ -792,53 +792,147 @@ else:
                 )
 
     # ---- Feuille de présence (enseignant)
-    with tab_presence:
-        st.markdown("#### Feuille de présence (enseignant)")
+# ---- Feuille de présence (enseignant) — version mobile friendly
+with tab_presence:
+    st.markdown("#### Feuille de présence (enseignant)")
 
-        etu_g_raw = subgroup_by_spec_level(etu, spec, niv, groupe).copy()
+    # Affichage compact pour smartphone
+    mobile_mode = st.toggle("📱 Mode mobile (affichage compact)", value=True, help="Affiche seulement Nom et Présent")
 
-        base_cols = [c for c in ["N°", "Matricule", "Nom", "Prenom", "Remarque"] if c in etu_g_raw.columns]
-        if not base_cols:
-            # fallback minimal (afficher au moins quelque chose)
-            base_cols = [c for c in etu_g_raw.columns if c not in {"Spec2", "Niv2", "Semestre"}][:5]
+    # Recherche rapide (utile quand la liste est longue)
+    q_filter = st.text_input("🔎 Recherche rapide (Nom/Prénom) :", value="").strip()
 
-        etu_g = etu_g_raw[base_cols].reset_index(drop=True)
+    # Charge la liste harmonisée pour le groupe
+    etu_g_raw = subgroup_by_spec_level(etu, spec, niv, groupe).copy()
 
-        if etu_g.empty:
-            st.warning("Pas de liste trouvée pour ce groupe (vérifie 'Groupe' = G11/G12 et 'Semestre' = S1).")
+    # Colonnes de base (SANS Matricule)
+    # On accepte plusieurs schémas possibles, mais on enlève Matricule de toute façon.
+    base_cols_pref = ["N°", "Nom", "Prenom", "Remarque"]
+    base_cols = [c for c in base_cols_pref if c in etu_g_raw.columns]
+
+    # Fallback si certaines colonnes n’existent pas
+    if not base_cols:
+        # On prend au moins 3 colonnes lisibles
+        base_cols = [c for c in etu_g_raw.columns if c not in {"Spec2", "Niv2", "Semestre", "Matricule"}][:3]
+
+    # Supprimer Matricule s’il existe
+    if "Matricule" in etu_g_raw.columns:
+        etu_g_raw = etu_g_raw.drop(columns=["Matricule"])
+
+    etu_g = etu_g_raw[base_cols].reset_index(drop=True)
+
+    if etu_g.empty:
+        st.warning("Pas de liste trouvée pour ce groupe (vérifie 'Groupe' = G11/G12 et 'Semestre' = S1).")
+    else:
+        # Fabrique une colonne "Nom complet" (toujours visible)
+        if "Nom" in etu_g.columns or "Prenom" in etu_g.columns:
+            etu_g["Nom complet"] = (etu_g.get("Nom", "").astype(str).str.strip() + " " +
+                                    etu_g.get("Prenom", "").astype(str).str.strip()).str.strip()
         else:
-            key_df = f"presence_{spec}_{niv}_{groupe}"
-            if key_df not in st.session_state:
-                df_init = etu_g.copy()
-                if "Présent" not in df_init.columns:
-                    df_init["Présent"] = False
-                st.session_state[key_df] = df_init
+            # Fallback : la première colonne devient "Nom complet"
+            first_col = etu_g.columns[0]
+            etu_g["Nom complet"] = etu_g[first_col].astype(str)
 
-            colA, colB, colC = st.columns([1, 1, 2])
-            with colA:
-                if st.button("✔️ Tout cocher", use_container_width=True):
-                    st.session_state[key_df]["Présent"] = True
-            with colB:
-                if st.button("✖️ Tout décocher", use_container_width=True):
-                    st.session_state[key_df]["Présent"] = False
-            with colC:
-                st.caption("Astuce : tu peux cocher/décocher ligne par ligne.")
+        # Ordre d’affichage : N°, Nom complet, Présent, Remarque (si dispo)
+        order = []
+        if "N°" in etu_g.columns: order.append("N°")
+        order += ["Nom complet"]
+        if "Remarque" in etu_g.columns: order.append("Remarque")
 
-            edited = st.data_editor(
-                st.session_state[key_df],
-                use_container_width=True,
-                height=460,
-                num_rows="fixed",
-                key=f"editor_{key_df}",
-            )
-            st.session_state[key_df] = edited
+        # Ajoute colonne Présent si absente
+        if "Présent" not in etu_g.columns:
+            etu_g["Présent"] = False
 
-            st.download_button(
-                "⬇️ Exporter la présence en Excel",
-                df_to_xlsx_bytes(edited),
-                file_name=f"Presence_{spec}_{niv}_G{groupe}_S1.xlsx",
-                use_container_width=True,
-            )
+        # Filtre rapide si saisi
+        if q_filter:
+            mask = etu_g["Nom complet"].str.contains(q_filter, case=False, na=False)
+            # On autorise aussi le filtre sur Remarque si présent
+            if "Remarque" in etu_g.columns:
+                mask = mask | etu_g["Remarque"].astype(str).str.contains(q_filter, case=False, na=False)
+            etu_g = etu_g[mask].reset_index(drop=True)
+
+        # Jeu de colonnes final selon mode mobile/desktop
+        if mobile_mode:
+            # Minimal : Nom complet + Présent (optionnel : Remarque)
+            show_cols = ["Nom complet", "Présent"]
+        else:
+            show_cols = [c for c in order if c in etu_g.columns] + ["Présent"]
+
+        # État en session (pour cocher / décocher)
+        key_df = f"presence_{spec}_{niv}_{groupe}"
+        if key_df not in st.session_state:
+            st.session_state[key_df] = etu_g.copy()[show_cols]
+        else:
+            # Ré-aligner si colonnes changent (ex : on toggle le mode)
+            missing = [c for c in show_cols if c not in st.session_state[key_df].columns]
+            if missing:
+                st.session_state[key_df] = etu_g.copy()[show_cols]
+            else:
+                # Mets à jour les lignes (ex : après filtre)
+                # On merge sur "Nom complet" (clé visuelle) pour conserver les cases cochées quand possible
+                left = etu_g.copy()[show_cols]
+                if "Nom complet" in show_cols:
+                    prev = st.session_state[key_df].set_index("Nom complet")
+                    new  = left.set_index("Nom complet")
+                    # Réinjection de Présent si existe
+                    if "Présent" in prev.columns and "Présent" in new.columns:
+                        new["Présent"] = new.index.map(prev["Présent"]).fillna(False)
+                    st.session_state[key_df] = new.reset_index()
+                else:
+                    st.session_state[key_df] = left
+
+        # Actions rapides
+        colA, colB, colC = st.columns([1, 1, 2])
+        with colA:
+            if st.button("✔️ Tout cocher", use_container_width=True):
+                st.session_state[key_df]["Présent"] = True
+        with colB:
+            if st.button("✖️ Tout décocher", use_container_width=True):
+                st.session_state[key_df]["Présent"] = False
+        with colC:
+            st.caption("Astuce : ‘Mode mobile’ n’affiche que Nom + Présent pour éviter le défilement horizontal.")
+
+        # Configuration d’affichage (largeur fixe des colonnes + libellés)
+        col_cfg = {
+            "Nom complet": st.column_config.TextColumn("Étudiant", width="large", disabled=True),
+        }
+        if "N°" in show_cols:
+            col_cfg["N°"] = st.column_config.NumberColumn("N°", width="small", disabled=True)
+        if "Remarque" in show_cols:
+            col_cfg["Remarque"] = st.column_config.TextColumn("Remarque", width="medium")
+        if "Présent" in show_cols:
+            col_cfg["Présent"] = st.column_config.CheckboxColumn("Présent", help="Cocher la présence")
+
+        # Data editor (optimisé tactile)
+        edited = st.data_editor(
+            st.session_state[key_df],
+            column_config=col_cfg,
+            hide_index=True,
+            use_container_width=True,
+            height=520 if not mobile_mode else 520,
+            num_rows="fixed",
+            key=f"editor_{key_df}_{'m' if mobile_mode else 'd'}",
+        )
+        st.session_state[key_df] = edited
+
+        # Export Excel (toujours SANS Matricule)
+        st.download_button(
+            "⬇️ Exporter la présence en Excel",
+            df_to_xlsx_bytes(edited),
+            file_name=f"Presence_{spec}_{niv}_G{groupe}_S1.xlsx",
+            use_container_width=True,
+        )
+
+        # Petit CSS pour lisibilité mobile (lignes aérées + taille touches)
+        st.markdown("""
+            <style>
+            /* un peu plus d'espace entre les lignes, utile sur smartphone */
+            [data-testid="stDataEditorRow"] { min-height: 38px; }
+            /* forcer le wrap du nom si très long */
+            [data-testid="column-Nom complet"] div { white-space: normal !important; }
+            </style>
+        """, unsafe_allow_html=True)
+
 
 
 # ----------------------------- FOOTER ---------------------------------
