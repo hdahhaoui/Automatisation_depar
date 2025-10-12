@@ -2,17 +2,18 @@
 # Portail Génie Civil — EDT & Listes (S1)
 # Unique fichier Streamlit : app/streamlit_app.py
 # ======================================================================
-# Fonctionnalités principales :
-# - Profils Étudiant / Enseignant (comportements distincts)
+# Fonctionnalités :
+# - Profils Étudiant / Enseignant (comportements et onglets distincts)
 # - Filtres hiérarchiques : Spécialité → Niveau → Groupe
 # - Normalisation EDT + Listes étudiants (S1)
 # - Harmonisation colonnes listes (Nom/Prénom, Matricule, …)
-# - Inférence Spec/Niveau/Groupe/Semestre depuis le nom de fichier
+# - Inférence Spec/Niveau/Groupe/Semestre depuis nom de fichier
 # - Vue Étudiant : Mon EDT, Prochaine séance (+ exports Excel)
 # - Vue Enseignant : Planning, Prochaine séance, Où trouver un enseignant ?, Feuille de présence
-# - Feuille de présence : case à cocher par étudiant + boutons Tout cocher / Tout décocher
+# - Feuille de présence : case à cocher par étudiant + Tout cocher / Tout décocher
 # - Exports uniquement en Excel (.xlsx) (aucun CSV)
 # - Option Mode impression
+# - Styles adaptatifs clair/sombre (étiquettes/badges lisibles dans les deux modes)
 #
 # Arborescence attendue :
 #   app/
@@ -27,7 +28,7 @@
 #   pandas
 #   openpyxl
 #
-# Conseillé : forcer thème sombre via .streamlit/config.toml :
+# Recommandé : forcer un thème sombre via .streamlit/config.toml :
 # [theme]
 # base = "dark"
 # primaryColor = "#5eead4"
@@ -47,6 +48,7 @@ from typing import Tuple, Optional, Iterable, Dict, Any
 
 import pandas as pd
 import streamlit as st
+
 
 # --------------------------- CONFIG GLOBALE ----------------------------
 
@@ -69,6 +71,7 @@ ORDER_JOUR = {
 }
 JOURS_FR = ["LUNDI", "MARDI", "MERCREDI", "JEUDI", "VENDREDI", "SAMEDI", "DIMANCHE"]
 
+
 # Colonnes attendues
 EDT_COLS = [
     "Niveau", "Spécialité", "Groupe", "Semestre", "Jour", "Heure début", "Heure fin",
@@ -79,28 +82,87 @@ STU_COLS = [
     "Matricule", "Nom", "Prenom", "Email", "Téléphone", "Remarque", "N°",
 ]
 
+
 # ------------------------------ STYLES --------------------------------
+# >>>> Correction : palette adaptative clair/sombre pour étiquettes/badges
 
 def inject_css() -> None:
     st.markdown(
         """
         <style>
+          /* --------- Styles généraux --------- */
           h1, h2, h3 { letter-spacing:.2px }
+
+          /* Palette adaptable clair/sombre via data-theme de Streamlit */
+          :root {
+            --bg-card-dark: #0f1624;
+            --bg-card-light: #f8fafc;
+            --pill-dark: #1f2937;      /* gris ardoise sombre */
+            --pill-light: #e5e7eb;     /* gris clair */
+            --text-dark: #e5e7eb;      /* texte clair */
+            --text-light: #111827;     /* texte foncé */
+            --border-dark: #1f2937;    /* bord sombre */
+            --border-light: #d1d5db;   /* bord clair */
+          }
+
+          html[data-theme="dark"] {
+            --bg-card: var(--bg-card-dark);
+            --pill-bg: var(--pill-dark);
+            --text-color: var(--text-dark);
+            --border-color: var(--border-dark);
+          }
+
+          html[data-theme="light"] {
+            --bg-card: var(--bg-card-light);
+            --pill-bg: var(--pill-light);
+            --text-color: var(--text-light);
+            --border-color: var(--border-light);
+          }
+
+          /* --------- Conteneurs --------- */
+          .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            padding: 1rem;
+            border-radius: 12px;
+            margin: .25rem 0 .75rem;
+            color: var(--text-color);
+          }
+
+          .pill {
+            padding: .35rem .6rem;
+            border-radius: 999px;
+            background: var(--pill-bg);
+            color: var(--text-color);
+            font-size: .85rem;
+          }
+
+          .badge {
+            padding: .15rem .45rem;
+            border-radius: 8px;
+            background: var(--pill-bg);
+            color: var(--text-color);
+            font-size: .78rem;
+            margin-left: .35rem;
+          }
+
+          .muted {
+            color: var(--text-color);
+            opacity: 0.75;
+            font-size: .9rem;
+          }
+
+          .role-etudiant  { background: #0b3b2e !important; color: #8ef5dd !important; }
+          .role-enseignant{ background: #2a2543 !important; color: #c3b5ff !important; }
+
           .actionbar { display:flex; gap:.5rem; flex-wrap:wrap; margin:.25rem 0 1rem }
-          .pill { padding:.35rem .6rem; border-radius:999px; background:#1f2937; font-size:.85rem }
-          .role-etudiant  { background:#0b3b2e; color:#8ef5dd }
-          .role-enseignant{ background:#2a2543; color:#c3b5ff }
           .stDataFrame table { font-size: 0.92rem }
-          .card { background:#0f1624; border:1px solid #1f2937; padding:1rem; border-radius:12px; margin: .25rem 0 .75rem }
-          .muted{ color:#9ca3af; font-size:.9rem }
-          .badge { padding:.15rem .45rem; border-radius:8px; background:#1f2937; font-size:.78rem; margin-left:.35rem }
           .sticky { position:sticky; top:0; z-index:9; background:transparent; padding-top:.25rem }
-          /* data_editor : réduire la densité */
-          [data-testid="stDataEditorContainer"] { border-radius: 12px; }
         </style>
         """,
         unsafe_allow_html=True,
     )
+
 
 def header_role(role_label: str, subtitle: str) -> None:
     role_class = "role-etudiant" if role_label == "Étudiant" else "role-enseignant"
@@ -118,7 +180,9 @@ def header_role(role_label: str, subtitle: str) -> None:
         unsafe_allow_html=True,
     )
 
+
 inject_css()
+
 
 # ----------------------------- HELPERS --------------------------------
 
@@ -130,6 +194,7 @@ def read_any(path: str) -> pd.DataFrame:
         return pd.read_csv(path)
     return pd.read_excel(path)
 
+
 def df_to_xlsx_bytes(df: pd.DataFrame) -> bytes:
     """
     DataFrame → bytes .xlsx (openpyxl).
@@ -138,6 +203,7 @@ def df_to_xlsx_bytes(df: pd.DataFrame) -> bytes:
     with pd.ExcelWriter(buf, engine="openpyxl") as xw:
         df.to_excel(xw, index=False)
     return buf.getvalue()
+
 
 def time_to_minutes(h: Any) -> Optional[int]:
     """
@@ -152,11 +218,13 @@ def time_to_minutes(h: Any) -> Optional[int]:
     except Exception:
         return None
 
+
 def minutes_to_dt(d: datetime, minutes: int) -> datetime:
     """
     Combine la date d et des minutes depuis minuit → datetime.
     """
     return datetime.combine(d.date(), dtime.min) + timedelta(minutes=minutes)
+
 
 def human_delta(dt: datetime, now: datetime) -> str:
     """
@@ -169,10 +237,14 @@ def human_delta(dt: datetime, now: datetime) -> str:
     s %= 3600
     m = s // 60
     parts = []
-    if d: parts.append(f"{d}j")
-    if h: parts.append(f"{h}h")
-    if m: parts.append(f"{m}m")
+    if d:
+        parts.append(f"{d}j")
+    if h:
+        parts.append(f"{h}h")
+    if m:
+        parts.append(f"{m}m")
     return " ".join(parts) or "0m"
+
 
 def next_session(now: datetime, edt_df: pd.DataFrame) -> Optional[Tuple[datetime, pd.Series]]:
     """
@@ -200,6 +272,7 @@ def next_session(now: datetime, edt_df: pd.DataFrame) -> Optional[Tuple[datetime
     rows.sort(key=lambda x: x[0])
     return rows[0]
 
+
 # --------------------- NORMALISATION & INFERENCE ----------------------
 
 def ensure_cols(df: pd.DataFrame, cols: Iterable[str], numeric: Iterable[str] = ()) -> pd.DataFrame:
@@ -212,9 +285,11 @@ def ensure_cols(df: pd.DataFrame, cols: Iterable[str], numeric: Iterable[str] = 
             df[c] = 0.0 if c in numeric else ""
     return df[[c for c in cols]]
 
+
 def normalize_semestre(val: Any, fallback: str = "S1") -> str:
     v = str(val).strip().upper()
     return v or fallback
+
 
 def normalize_groupe(val: Any) -> str:
     s = str(val).upper().replace(" ", "")
@@ -224,6 +299,7 @@ def normalize_groupe(val: Any) -> str:
         return "G" + s
     return s
 
+
 def classify_spec_level(spec_text: str, level_text: str) -> Tuple[str, str]:
     """
     Détecte (Spécialité, Niveau) à partir des champs.
@@ -231,19 +307,28 @@ def classify_spec_level(spec_text: str, level_text: str) -> Tuple[str, str]:
     S = (spec_text or "").upper()
     L = (level_text or "").upper()
     # Masters
-    if "RIB" in S:        return "RIB",        "M1" if "M1" in S + L else ("M2" if "M2" in S + L else "")
-    if "VOA" in S:        return "VOA",        "M1" if "M1" in S + L else ("M2" if "M2" in S + L else "")
-    if "STRUCT" in S:     return "STRUCTURE",  "M1" if "M1" in S + L else ("M2" if "M2" in S + L else "")
+    if "RIB" in S:
+        return "RIB", "M1" if "M1" in S + L else ("M2" if "M2" in S + L else "")
+    if "VOA" in S:
+        return "VOA", "M1" if "M1" in S + L else ("M2" if "M2" in S + L else "")
+    if "STRUCT" in S:
+        return "STRUCTURE", "M1" if "M1" in S + L else ("M2" if "M2" in S + L else "")
     # Licence
-    if "L2" in S + L or "LICENCE 2" in S: return "LICENCE", "2"
-    if "L3" in S + L or "LICENCE 3" in S: return "LICENCE", "3"
+    if "L2" in S + L or "LICENCE 2" in S:
+        return "LICENCE", "2"
+    if "L3" in S + L or "LICENCE 3" in S:
+        return "LICENCE", "3"
     # Ingénieur
     if any(k in S + L for k in ["ING", "INGÉ", "INGENIEUR", "INGÉNIEUR"]):
-        if "1" in S + L: return "INGENIEUR", "1"
-        if "2" in S + L: return "INGENIEUR", "2"
-        if "3" in S + L: return "INGENIEUR", "3"
+        if "1" in S + L:
+            return "INGENIEUR", "1"
+        if "2" in S + L:
+            return "INGENIEUR", "2"
+        if "3" in S + L:
+            return "INGENIEUR", "3"
         return "INGENIEUR", ""
     return "", ""
+
 
 def infer_from_filename(path: str) -> Tuple[Optional[str], Optional[str], Optional[str], str]:
     """
@@ -255,30 +340,48 @@ def infer_from_filename(path: str) -> Tuple[Optional[str], Optional[str], Option
     name = Path(path).stem.upper().replace("-", "_")
     g = None
     m = re.search(r"_G\s*?(\d+)", name)
-    if m: g = f"G{m.group(1)}"
+    if m:
+        g = f"G{m.group(1)}"
     sem = None
     m = re.search(r"_S\s*?(\d+)", name)
-    if m: sem = f"S{m.group(1)}"
-    if "RIB" in name:    return "RIB",        ("M2" if "M2" in name else "M1"), g, (sem or "S1")
-    if "VOA" in name:    return "VOA",        ("M2" if "M2" in name else "M1"), g, (sem or "S1")
-    if "STRUCT" in name: return "STRUCTURE",  ("M2" if "M2" in name else "M1"), g, (sem or "S1")
-    if "L2" in name:     return "LICENCE", "2", g, (sem or "S1")
-    if "L3" in name:     return "LICENCE", "3", g, (sem or "S1")
-    if "1ING" in name:   return "INGENIEUR", "1", g, (sem or "S1")
-    if "2ING" in name:   return "INGENIEUR", "2", g, (sem or "S1")
-    if "3ING" in name:   return "INGENIEUR", "3", g, (sem or "S1")
+    if m:
+        sem = f"S{m.group(1)}"
+    if "RIB" in name:
+        return "RIB", ("M2" if "M2" in name else "M1"), g, (sem or "S1")
+    if "VOA" in name:
+        return "VOA", ("M2" if "M2" in name else "M1"), g, (sem or "S1")
+    if "STRUCT" in name:
+        return "STRUCTURE", ("M2" if "M2" in name else "M1"), g, (sem or "S1")
+    if "L2" in name:
+        return "LICENCE", "2", g, (sem or "S1")
+    if "L3" in name:
+        return "LICENCE", "3", g, (sem or "S1")
+    if "1ING" in name:
+        return "INGENIEUR", "1", g, (sem or "S1")
+    if "2ING" in name:
+        return "INGENIEUR", "2", g, (sem or "S1")
+    if "3ING" in name:
+        return "INGENIEUR", "3", g, (sem or "S1")
     return None, None, g, (sem or "S1")
 
+
 def level_options_for(spec: str) -> Iterable[str]:
-    if spec in ("RIB", "VOA", "STRUCTURE"): return ["M1", "M2"]
-    if spec == "LICENCE": return ["2", "3"]
-    if spec == "INGENIEUR": return ["1", "2", "3"]
+    if spec in ("RIB", "VOA", "STRUCTURE"):
+        return ["M1", "M2"]
+    if spec == "LICENCE":
+        return ["2", "3"]
+    if spec == "INGENIEUR":
+        return ["1", "2", "3"]
     return []
 
+
 def pretty_level_label(spec: str, niv: str) -> str:
-    if spec == "LICENCE": return f"LICENCE {niv}"
-    if spec == "INGENIEUR": return f"INGENIEUR {niv}"
+    if spec == "LICENCE":
+        return f"LICENCE {niv}"
+    if spec == "INGENIEUR":
+        return f"INGENIEUR {niv}"
     return niv  # Masters M1/M2
+
 
 # ------------------ HARMONISATION LISTES ÉTUDIANTS --------------------
 
@@ -329,6 +432,7 @@ def harmonize_student_columns(df: pd.DataFrame) -> pd.DataFrame:
             df[col] = df[col].astype(str).str.strip()
     return df
 
+
 # ------------------ CHARGEMENT ET MISE EN FORME ----------------------
 
 @st.cache_data
@@ -352,10 +456,14 @@ def load_raw_s1() -> Tuple[pd.DataFrame, pd.DataFrame]:
             # fallback via fichier si besoin
             if (df["Spec2"] == "").any() or (df["Niv2"] == "").any() or (df["Groupe"] == "").any():
                 s2_f, n2_f, g_f, sem_f = infer_from_filename(f)
-                if s2_f: df.loc[df["Spec2"] == "", "Spec2"] = s2_f
-                if n2_f: df.loc[df["Niv2"] == "", "Niv2"] = n2_f
-                if g_f:  df.loc[df["Groupe"] == "", "Groupe"] = normalize_groupe(g_f)
-                if sem_f: df.loc[df["Semestre"] == "", "Semestre"] = sem_f
+                if s2_f:
+                    df.loc[df["Spec2"] == "", "Spec2"] = s2_f
+                if n2_f:
+                    df.loc[df["Niv2"] == "", "Niv2"] = n2_f
+                if g_f:
+                    df.loc[df["Groupe"] == "", "Groupe"] = normalize_groupe(g_f)
+                if sem_f:
+                    df.loc[df["Semestre"] == "", "Semestre"] = sem_f
 
             edt_list.append(df)
         except Exception as e:
@@ -384,10 +492,14 @@ def load_raw_s1() -> Tuple[pd.DataFrame, pd.DataFrame]:
             # fallback fichier
             if (df["Spec2"] == "").any() or (df["Niv2"] == "").any() or (df["Groupe"] == "").any():
                 s2_f, n2_f, g_f, sem_f = infer_from_filename(f)
-                if s2_f: df.loc[df["Spec2"] == "", "Spec2"] = s2_f
-                if n2_f: df.loc[df["Niv2"] == "", "Niv2"] = n2_f
-                if g_f:  df.loc[df["Groupe"] == "", "Groupe"] = normalize_groupe(g_f)
-                if sem_f: df.loc[df["Semestre"] == "", "Semestre"] = sem_f
+                if s2_f:
+                    df.loc[df["Spec2"] == "", "Spec2"] = s2_f
+                if n2_f:
+                    df.loc[df["Niv2"] == "", "Niv2"] = n2_f
+                if g_f:
+                    df.loc[df["Groupe"] == "", "Groupe"] = normalize_groupe(g_f)
+                if sem_f:
+                    df.loc[df["Semestre"] == "", "Semestre"] = sem_f
 
             stu_list.append(df)
         except Exception as e:
@@ -400,6 +512,7 @@ def load_raw_s1() -> Tuple[pd.DataFrame, pd.DataFrame]:
 
     return edt, etu
 
+
 def subgroup_by_spec_level(df: pd.DataFrame, spec: Optional[str] = None,
                            niv: Optional[str] = None, groupe: Optional[str] = None) -> pd.DataFrame:
     keep = df[df["Semestre"].astype(str).str.upper() == SEMESTRE]
@@ -411,6 +524,7 @@ def subgroup_by_spec_level(df: pd.DataFrame, spec: Optional[str] = None,
         gnorm = normalize_groupe(groupe)
         keep = keep[keep["Groupe"].apply(normalize_groupe) == gnorm]
     return keep
+
 
 # ----------------------------- UI GLOBALE -----------------------------
 
@@ -430,7 +544,9 @@ with st.sidebar:
     st.caption("Filtres hiérarchiques")
 
     spec_order = ["RIB", "VOA", "STRUCTURE", "LICENCE", "INGENIEUR"]
-    available_specs = [s for s in spec_order if s in edt["Spec2"].dropna().unique().tolist() or s in etu["Spec2"].dropna().unique().tolist()]
+    available_specs = [s for s in spec_order
+                       if s in edt["Spec2"].dropna().unique().tolist()
+                       or s in etu["Spec2"].dropna().unique().tolist()]
     spec = st.selectbox("Spécialité", available_specs, index=0 if available_specs else None)
 
     raw_levels = list(level_options_for(spec))
@@ -469,6 +585,7 @@ bloc = subgroup_by_spec_level(edt, spec, niv, groupe)
 now = datetime.now()
 title_clean = f"{spec} {pretty_level_label(spec, niv)}".strip()
 
+
 # ============================ VUE ÉTUDIANT ============================
 
 if role == "Étudiant":
@@ -486,7 +603,11 @@ if role == "Étudiant":
             file_name=f"EDT_{spec}_{niv}_G{groupe}_S1.xlsx",
             use_container_width=True,
         )
-        st.dataframe(view.rename(columns={"Heure début": "Début", "Heure fin": "Fin"}), use_container_width=True, hide_index=True)
+        st.dataframe(
+            view.rename(columns={"Heure début": "Début", "Heure fin": "Fin"}),
+            use_container_width=True,
+            hide_index=True
+        )
 
     # ---- Prochaine séance
     with tab_next:
@@ -497,7 +618,9 @@ if role == "Étudiant":
             st.markdown(
                 f"""
                 <div class="card">
-                  <div style="font-size:1.1rem;font-weight:600">{r['Matière']} <span class="badge">{r['Type']}</span></div>
+                  <div style="font-size:1.1rem;font-weight:600">
+                    {r['Matière']} <span class="badge">{r['Type']}</span>
+                  </div>
                   <div class="muted">
                     {r['Jour']} • {r['Heure début']}–{r['Heure fin']}
                     <span class="badge">Salle {r['Salle']}</span>
@@ -510,6 +633,7 @@ if role == "Étudiant":
             )
         else:
             st.info("Aucune séance à venir avec ces filtres.")
+
 
 # =========================== VUE ENSEIGNANT ===========================
 
@@ -544,7 +668,9 @@ else:
             st.markdown(
                 f"""
                 <div class="card">
-                  <div style="font-size:1.1rem;font-weight:600">{r['Matière']} <span class="badge">{r['Type']}</span></div>
+                  <div style="font-size:1.1rem;font-weight:600">
+                    {r['Matière']} <span class="badge">{r['Type']}</span>
+                  </div>
                   <div class="muted">
                     {r['Jour']} • {r['Heure début']}–{r['Heure fin']}
                     <span class="badge">Salle {r['Salle']}</span>
@@ -714,11 +840,12 @@ else:
                 use_container_width=True,
             )
 
+
 # ----------------------------- FOOTER ---------------------------------
 
 st.divider()
 st.caption(
     "S1 • Spécialité → Niveau → Groupe • Groupes normalisés (G11/G12) • "
     "Harmonisation des listes étudiants • Exports uniquement en Excel (.xlsx) • "
-    "Feuille de présence côté enseignant uniquement."
+    "Feuille de présence côté enseignant uniquement • Styles adaptatifs clair/sombre."
 )
