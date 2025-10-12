@@ -6,13 +6,12 @@
 # - Profils Étudiant / Enseignant (comportements distincts)
 # - Filtres hiérarchiques : Spécialité → Niveau → Groupe
 # - Normalisation EDT + Listes étudiants (S1)
-# - Harmonisation colonnes listes (Nom/Prénom, etc.) + suppression Matricule en présence
-# - Inférence Spec/Niveau/Groupe/Semestre depuis le nom de fichier
+# - Inférence Spec/Niveau/Groupe/Semestre depuis le nom de fichier (robuste)
 # - Vue Étudiant : Mon EDT, Prochaine séance (+ exports Excel)
 # - Vue Enseignant : Planning, Prochaine séance, Où trouver un enseignant ?, Feuille de présence (mobile friendly)
 # - Feuille de présence : Nom complet + Présent (mode mobile), recherche, Tout cocher / Tout décocher, export Excel
 # - Exports uniquement en Excel (.xlsx)
-# - Option Mode impression
+# - Option Mode impression + panneau diagnostic si EDT vide
 #
 # Arborescence attendue :
 #   app/
@@ -26,14 +25,6 @@
 #   streamlit
 #   pandas
 #   openpyxl
-#
-# Conseillé : .streamlit/config.toml (thème sombre)
-# [theme]
-# base = "dark"
-# primaryColor = "#5eead4"
-# backgroundColor = "#0b0f17"
-# secondaryBackgroundColor = "#121826"
-# textColor = "#e5e7eb"
 # ======================================================================
 
 from __future__ import annotations
@@ -95,7 +86,6 @@ def inject_css() -> None:
           .muted{ color:#9ca3af; font-size:.9rem }
           .badge { padding:.15rem .45rem; border-radius:8px; background:#1f2937; font-size:.78rem; margin-left:.35rem }
           .sticky { position:sticky; top:0; z-index:9; background:transparent; padding-top:.25rem }
-          /* Data Editor : adoucir les bordures */
           [data-testid="stDataEditorContainer"] { border-radius: 12px; }
         </style>
         """,
@@ -224,24 +214,60 @@ def classify_spec_level(spec_text: str, level_text: str) -> Tuple[str, str]:
         return "INGENIEUR", ""
     return "", ""
 
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>  NOUVELLE  <<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 def infer_from_filename(path: str) -> Tuple[Optional[str], Optional[str], Optional[str], str]:
-    """Infère (Spec2, Niv2, Groupe, Semestre) depuis le nom du fichier."""
-    name = Path(path).stem.upper().replace("-", "_")
+    """
+    Infère (Spec2, Niv2, Groupe, Semestre) depuis le nom du fichier.
+    Compatible avec les variantes : 2ING, ING2, ING_2, ING-2, 2-ING, INGENIEUR2, etc.
+    Groupes : G11, _G11, -G11, G 11
+    Semestre : S1, _S1, S 1
+    """
+    name = Path(path).stem.upper()
+    name_compact = re.sub(r"[\s\-]+", "_", name)  # espaces/tirets -> _
+    name_nospace = re.sub(r"\s+", "", name)
+
+    # Groupe
     g = None
-    m = re.search(r"_G\s*?(\d+)", name)
-    if m: g = f"G{m.group(1)}"
+    m = re.search(r"(?:^|[_\-])G\s*?(\d+)", name, flags=re.I)
+    if not m:
+        m = re.search(r"G\s*?(\d+)", name, flags=re.I)
+    if m:
+        g = f"G{m.group(1)}"
+
+    # Semestre
     sem = None
-    m = re.search(r"_S\s*?(\d+)", name)
-    if m: sem = f"S{m.group(1)}"
-    if "RIB" in name:    return "RIB",        ("M2" if "M2" in name else "M1"), g, (sem or "S1")
-    if "VOA" in name:    return "VOA",        ("M2" if "M2" in name else "M1"), g, (sem or "S1")
-    if "STRUCT" in name: return "STRUCTURE",  ("M2" if "M2" in name else "M1"), g, (sem or "S1")
-    if "L2" in name:     return "LICENCE", "2", g, (sem or "S1")
-    if "L3" in name:     return "LICENCE", "3", g, (sem or "S1")
-    if "1ING" in name:   return "INGENIEUR", "1", g, (sem or "S1")
-    if "2ING" in name:   return "INGENIEUR", "2", g, (sem or "S1")
-    if "3ING" in name:   return "INGENIEUR", "3", g, (sem or "S1")
+    m = re.search(r"(?:^|[_\-])S\s*?(\d+)", name, flags=re.I)
+    if not m:
+        m = re.search(r"S\s*?(\d+)", name, flags=re.I)
+    if m:
+        sem = f"S{m.group(1)}"
+
+    # Spécialités M1/M2
+    if "RIB" in name_nospace:
+        niv = "M2" if "M2" in name_nospace else ("M1" if "M1" in name_nospace else "")
+        return "RIB", niv, g, (sem or "S1")
+    if "VOA" in name_nospace:
+        niv = "M2" if "M2" in name_nospace else ("M1" if "M1" in name_nospace else "")
+        return "VOA", niv, g, (sem or "S1")
+    if "STRUCT" in name_nospace or "STRUC" in name_nospace:
+        niv = "M2" if "M2" in name_nospace else ("M1" if "M1" in name_nospace else "")
+        return "STRUCTURE", niv, g, (sem or "S1")
+
+    # LICENCE 2/3
+    m = re.search(r"(?:LICENCE|L)[_\- ]?([23])", name_compact)
+    if m:
+        return "LICENCE", m.group(1), g, (sem or "S1")
+
+    # INGENIEUR 1/2/3 (toutes formes)
+    m = re.search(r"(?:INGENIEUR|ING)[_\- ]?([123])", name_compact)
+    if not m:
+        m = re.search(r"([123])[_\- ]?(?:INGENIEUR|ING)", name_compact)
+    if m:
+        return "INGENIEUR", m.group(1), g, (sem or "S1")
+
+    # Par défaut
     return None, None, g, (sem or "S1")
+# >>>>>>>>>>>>>>>>>>>>>>>>>>  FIN NOUVELLE  <<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
 def level_options_for(spec: str) -> Iterable[str]:
     if spec in ("RIB","VOA","STRUCTURE"): return ["M1","M2"]
@@ -253,7 +279,6 @@ def pretty_level_label(spec: str, niv: str) -> str:
     if spec == "LICENCE": return f"LICENCE {niv}"
     if spec == "INGENIEUR": return f"INGENIEUR {niv}"
     return niv
-
 # ------------------ HARMONISATION LISTES ÉTUDIANTS --------------------
 
 def harmonize_student_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -311,14 +336,17 @@ def load_raw_s1() -> Tuple[pd.DataFrame, pd.DataFrame]:
             df = ensure_cols(df, EDT_COLS, numeric=["Durée (h)"])
             df["Semestre"] = df["Semestre"].apply(normalize_semestre)
             df["Groupe"] = df["Groupe"].apply(normalize_groupe)
+
             specs, nivs = zip(*df.apply(lambda r: classify_spec_level(r.get("Spécialité",""), r.get("Niveau","")), axis=1))
             df["Spec2"], df["Niv2"] = specs, nivs
+
             if (df["Spec2"] == "").any() or (df["Niv2"] == "").any() or (df["Groupe"] == "").any():
                 s2_f, n2_f, g_f, sem_f = infer_from_filename(f)
                 if s2_f: df.loc[df["Spec2"] == "", "Spec2"] = s2_f
                 if n2_f: df.loc[df["Niv2"] == "", "Niv2"] = n2_f
                 if g_f:  df.loc[df["Groupe"] == "", "Groupe"] = normalize_groupe(g_f)
                 if sem_f: df.loc[df["Semestre"] == "", "Semestre"] = sem_f
+
             edt_list.append(df)
         except Exception as e:
             st.warning(f"EDT ignoré: {Path(f).name} ({e})")
@@ -339,14 +367,17 @@ def load_raw_s1() -> Tuple[pd.DataFrame, pd.DataFrame]:
             df = ensure_cols(df, STU_COLS)
             df["Semestre"] = df["Semestre"].apply(normalize_semestre)
             df["Groupe"] = df["Groupe"].apply(normalize_groupe)
+
             specs, nivs = zip(*df.apply(lambda r: classify_spec_level(r.get("Spécialité",""), r.get("Niveau","")), axis=1))
             df["Spec2"], df["Niv2"] = specs, nivs
+
             if (df["Spec2"] == "").any() or (df["Niv2"] == "").any() or (df["Groupe"] == "").any():
                 s2_f, n2_f, g_f, sem_f = infer_from_filename(f)
                 if s2_f: df.loc[df["Spec2"] == "", "Spec2"] = s2_f
                 if n2_f: df.loc[df["Niv2"] == "", "Niv2"] = n2_f
                 if g_f:  df.loc[df["Groupe"] == "", "Groupe"] = normalize_groupe(g_f)
                 if sem_f: df.loc[df["Semestre"] == "", "Semestre"] = sem_f
+
             stu_list.append(df)
         except Exception as e:
             st.warning(f"Liste ignorée: {Path(f).name} ({e})")
@@ -419,9 +450,19 @@ if print_mode:
     )
 
 bloc = subgroup_by_spec_level(edt, spec, niv, groupe)
+
+# 🔍 Diagnostic si EDT vide
+if bloc.empty:
+    with st.expander("🔍 Diagnostic (EDT vide pour ce filtre)", expanded=False):
+        df_spec = edt[edt["Spec2"] == spec]
+        st.write("Niveaux disponibles pour", spec, ":", sorted(df_spec["Niv2"].dropna().unique().tolist()))
+        st.write("Groupes vus pour", spec, niv, ":", sorted(
+            df_spec[df_spec["Niv2"] == niv]["Groupe"].dropna().map(normalize_groupe).unique().tolist()
+        ))
+        st.write("Exemples de fichiers détectés dans EDT :", [Path(p).name for p in glob.glob(f"{RAW_EDT}/*")][:12])
+
 now = datetime.now()
 title_clean = f"{spec} {pretty_level_label(spec, niv)}".strip()
-
 # ============================ VUE ÉTUDIANT ============================
 
 if role == "Étudiant":
@@ -715,9 +756,7 @@ else:
             # CSS lisibilité mobile
             st.markdown("""
                 <style>
-                /* espace ligne plus grand pour toucher facilement */
                 [data-testid="stDataEditorRow"] { min-height: 40px; }
-                /* nom long : retour à la ligne si nécessaire */
                 [data-testid="column-Nom complet"] div { white-space: normal !important; }
                 </style>
             """, unsafe_allow_html=True)
