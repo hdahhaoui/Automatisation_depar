@@ -1,24 +1,22 @@
 # ======================================================================
 # Portail Génie Civil — EDT & Listes (S1)
-# Unique fichier Streamlit : app/streamlit_app.py
+# Fichier unique : app/streamlit_app.py
 # ======================================================================
-# Fonctionnalités :
-# - Profils Étudiant / Enseignant (comportements distincts)
-# - Filtres hiérarchiques : Spécialité → Niveau → Groupe
-# - Normalisation EDT + Listes étudiants (S1)
-# - Inférence Spec/Niveau/Groupe/Semestre depuis le nom de fichier (robuste)
-# - Vue Étudiant : Mon EDT, Prochaine séance (+ exports Excel)
-# - Vue Enseignant : Planning, Prochaine séance, Où trouver un enseignant ?, Feuille de présence (mobile friendly)
-# - Feuille de présence : Nom complet + Présent (mode mobile), recherche, Tout cocher / Tout décocher, export Excel
-# - Exports uniquement en Excel (.xlsx)
-# - Option Mode impression + panneau diagnostic si EDT vide
+# Points clés :
+# - Profils Étudiant / Enseignant, filtres hiérarchiques Spécialité → Niveau → Groupe
+# - Normalisation des EDT & listes étudiants (S1)
+# - Inférence robuste depuis nom de fichier (ING2, 2-ING, ING_2, etc.)
+# - Export Excel uniquement (.xlsx)
+# - Feuille de présence mobile (sans matricule) avec Tout cocher / Tout décocher
+# - Panneaux diagnostic (EDT vide + Index des fichiers détectés)
+# - Découverte S1 tolérante : par nom OU par contenu (“Semestre”)
 #
 # Arborescence attendue :
 #   app/
 #     streamlit_app.py
 #     data/
 #       raw/
-#         edt/        ← fichiers EDT *_S1.{xlsx,csv}
+#         edt/        ← fichiers EDT *_S1.{xlsx,csv} (ou fichier multi-semestres avec col Semestre=S1)
 #         students/   ← fichiers listes *_S1.{xlsx,csv}
 #
 # requirements.txt :
@@ -213,12 +211,11 @@ def classify_spec_level(spec_text: str, level_text: str) -> Tuple[str, str]:
         if "3" in S+L: return "INGENIEUR", "3"
         return "INGENIEUR", ""
     return "", ""
-
 # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>  NOUVELLE  <<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 def infer_from_filename(path: str) -> Tuple[Optional[str], Optional[str], Optional[str], str]:
     """
     Infère (Spec2, Niv2, Groupe, Semestre) depuis le nom du fichier.
-    Compatible avec les variantes : 2ING, ING2, ING_2, ING-2, 2-ING, INGENIEUR2, etc.
+    Compatible avec : 2ING, ING2, ING_2, ING-2, 2-ING, INGENIEUR2, etc.
     Groupes : G11, _G11, -G11, G 11
     Semestre : S1, _S1, S 1
     """
@@ -269,16 +266,7 @@ def infer_from_filename(path: str) -> Tuple[Optional[str], Optional[str], Option
     return None, None, g, (sem or "S1")
 # >>>>>>>>>>>>>>>>>>>>>>>>>>  FIN NOUVELLE  <<<<<<<<<<<<<<<<<<<<<<<<<<<<<
 
-def level_options_for(spec: str) -> Iterable[str]:
-    if spec in ("RIB","VOA","STRUCTURE"): return ["M1","M2"]
-    if spec == "LICENCE": return ["2","3"]
-    if spec == "INGENIEUR": return ["1","2","3"]
-    return []
 
-def pretty_level_label(spec: str, niv: str) -> str:
-    if spec == "LICENCE": return f"LICENCE {niv}"
-    if spec == "INGENIEUR": return f"INGENIEUR {niv}"
-    return niv
 # ------------------ HARMONISATION LISTES ÉTUDIANTS --------------------
 
 def harmonize_student_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -323,67 +311,162 @@ def harmonize_student_columns(df: pd.DataFrame) -> pd.DataFrame:
             df[col] = df[col].astype(str).str.strip()
     return df
 
-# ------------------ CHARGEMENT ET MISE EN FORME ----------------------
+
+# ------------------ CHARGEMENT ET MISE EN FORME (NOUVEAU) --------------
 
 @st.cache_data
-def load_raw_s1() -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Charge tous les fichiers EDT et étudiants de S1, normalise, et renvoie (edt, etu)."""
-    # ----- EDT
-    edt_list = []
-    for f in glob.glob(f"{RAW_EDT}/*_S1.*"):
+def load_raw_s1() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Charge TOUS les fichiers du dossier, puis garde S1 si :
+      - le nom du fichier contient 'S1' (insensible à la casse), OU
+      - la colonne 'Semestre' contient 'S1'.
+    Retourne: (edt, etu, idx) où idx = index de fichiers détectés (diagnostic).
+    """
+    # -------------------- INDEX DIAGNOSTIC (par fichier) --------------------
+    idx_rows = []  # on y mettra une ligne par fichier analysé
+
+    # ----------------------------- EDT -------------------------------------
+    edt_frames = []
+    for f in sorted(glob.glob(f"{RAW_EDT}/*.*")):
+        fname = Path(f).name
+        name_up = fname.upper()
+
         try:
             df = read_any(f)
-            df = ensure_cols(df, EDT_COLS, numeric=["Durée (h)"])
-            df["Semestre"] = df["Semestre"].apply(normalize_semestre)
-            df["Groupe"] = df["Groupe"].apply(normalize_groupe)
-
-            specs, nivs = zip(*df.apply(lambda r: classify_spec_level(r.get("Spécialité",""), r.get("Niveau","")), axis=1))
-            df["Spec2"], df["Niv2"] = specs, nivs
-
-            if (df["Spec2"] == "").any() or (df["Niv2"] == "").any() or (df["Groupe"] == "").any():
-                s2_f, n2_f, g_f, sem_f = infer_from_filename(f)
-                if s2_f: df.loc[df["Spec2"] == "", "Spec2"] = s2_f
-                if n2_f: df.loc[df["Niv2"] == "", "Niv2"] = n2_f
-                if g_f:  df.loc[df["Groupe"] == "", "Groupe"] = normalize_groupe(g_f)
-                if sem_f: df.loc[df["Semestre"] == "", "Semestre"] = sem_f
-
-            edt_list.append(df)
         except Exception as e:
-            st.warning(f"EDT ignoré: {Path(f).name} ({e})")
+            idx_rows.append({
+                "Type": "EDT", "Fichier": fname, "Lu": False,
+                "Erreur": str(e), "S1_par_nom": "S1" in name_up, "S1_par_col": None,
+                "Spec2": None, "Niv2": None, "Groupe": None
+            })
+            continue
 
-    if edt_list:
-        edt = pd.concat(edt_list, ignore_index=True)
+        # Harmonisation minimale
+        df = ensure_cols(df, EDT_COLS, numeric=["Durée (h)"])
+        df["Semestre"] = df["Semestre"].apply(normalize_semestre)
+        df["Groupe"] = df["Groupe"].apply(normalize_groupe)
+
+        # Détection S1 par la colonne
+        has_s1_col = df["Semestre"].astype(str).str.upper().eq("S1").any()
+        s1_by_name = "S1" in name_up
+
+        # Si ni le nom ni la colonne ne donnent S1, on ignore ce fichier
+        if not (s1_by_name or has_s1_col):
+            idx_rows.append({
+                "Type": "EDT", "Fichier": fname, "Lu": True,
+                "Erreur": "", "S1_par_nom": s1_by_name, "S1_par_col": has_s1_col,
+                "Spec2": None, "Niv2": None, "Groupe": None
+            })
+            continue
+
+        # Spécialité/Niveau depuis colonnes libres
+        specs, nivs = zip(*df.apply(
+            lambda r: classify_spec_level(r.get("Spécialité",""), r.get("Niveau","")),
+            axis=1
+        ))
+        df["Spec2"], df["Niv2"] = specs, nivs
+
+        # Si besoin, inférence depuis le nom du fichier
+        if (df["Spec2"] == "").any() or (df["Niv2"] == "").any() or (df["Groupe"] == "").any():
+            s2_f, n2_f, g_f, sem_f = infer_from_filename(f)
+            if s2_f:  df.loc[df["Spec2"] == "", "Spec2"] = s2_f
+            if n2_f:  df.loc[df["Niv2"] == "", "Niv2"] = n2_f
+            if g_f:   df.loc[df["Groupe"] == "", "Groupe"] = normalize_groupe(g_f)
+            if sem_f: df.loc[df["Semestre"] == "", "Semestre"] = sem_f
+
+        # Pour l’index, on retient un échantillon des méta détectées
+        idx_rows.append({
+            "Type": "EDT",
+            "Fichier": fname,
+            "Lu": True,
+            "Erreur": "",
+            "S1_par_nom": s1_by_name,
+            "S1_par_col": has_s1_col,
+            "Spec2": df["Spec2"].dropna().astype(str).str.upper().replace("", None).mode().tolist()[:1] or [None],
+            "Niv2": df["Niv2"].dropna().astype(str).str.upper().replace("", None).mode().tolist()[:1] or [None],
+            "Groupe": df["Groupe"].dropna().map(normalize_groupe).mode().tolist()[:1] or [None],
+        })
+
+        # Et on ne garde que S1 dans le contenu
+        df = df[df["Semestre"].astype(str).str.upper() == "S1"].copy()
+        edt_frames.append(df)
+
+    if edt_frames:
+        edt = pd.concat(edt_frames, ignore_index=True)
         edt["__o"] = edt["Jour"].map(ORDER_JOUR).fillna(99)
         edt = edt.sort_values(["Spec2","Niv2","Groupe","__o","Heure début"]).drop(columns="__o")
     else:
         edt = pd.DataFrame(columns=EDT_COLS + ["Spec2","Niv2"])
 
-    # ----- Étudiants
-    stu_list = []
-    for f in glob.glob(f"{RAW_STU}/*_S1.*"):
+    # --------------------------- ETUDIANTS ----------------------------------
+    stu_frames = []
+    for f in sorted(glob.glob(f"{RAW_STU}/*.*")):
+        fname = Path(f).name
+        name_up = fname.upper()
+
         try:
             df = read_any(f)
-            df = harmonize_student_columns(df)
-            df = ensure_cols(df, STU_COLS)
-            df["Semestre"] = df["Semestre"].apply(normalize_semestre)
-            df["Groupe"] = df["Groupe"].apply(normalize_groupe)
-
-            specs, nivs = zip(*df.apply(lambda r: classify_spec_level(r.get("Spécialité",""), r.get("Niveau","")), axis=1))
-            df["Spec2"], df["Niv2"] = specs, nivs
-
-            if (df["Spec2"] == "").any() or (df["Niv2"] == "").any() or (df["Groupe"] == "").any():
-                s2_f, n2_f, g_f, sem_f = infer_from_filename(f)
-                if s2_f: df.loc[df["Spec2"] == "", "Spec2"] = s2_f
-                if n2_f: df.loc[df["Niv2"] == "", "Niv2"] = n2_f
-                if g_f:  df.loc[df["Groupe"] == "", "Groupe"] = normalize_groupe(g_f)
-                if sem_f: df.loc[df["Semestre"] == "", "Semestre"] = sem_f
-
-            stu_list.append(df)
         except Exception as e:
-            st.warning(f"Liste ignorée: {Path(f).name} ({e})")
+            idx_rows.append({
+                "Type": "ETU", "Fichier": fname, "Lu": False,
+                "Erreur": str(e), "S1_par_nom": "S1" in name_up, "S1_par_col": None,
+                "Spec2": None, "Niv2": None, "Groupe": None
+            })
+            continue
 
-    etu = pd.concat(stu_list, ignore_index=True) if stu_list else pd.DataFrame(columns=STU_COLS + ["Spec2","Niv2"])
-    return edt, etu
+        df = harmonize_student_columns(df)
+        df = ensure_cols(df, STU_COLS)
+        df["Semestre"] = df["Semestre"].apply(normalize_semestre)
+        df["Groupe"] = df["Groupe"].apply(normalize_groupe)
+
+        has_s1_col = df["Semestre"].astype(str).str.upper().eq("S1").any()
+        s1_by_name = "S1" in name_up
+        if not (s1_by_name or has_s1_col):
+            idx_rows.append({
+                "Type": "ETU", "Fichier": fname, "Lu": True,
+                "Erreur": "", "S1_par_nom": s1_by_name, "S1_par_col": has_s1_col,
+                "Spec2": None, "Niv2": None, "Groupe": None
+            })
+            continue
+
+        specs, nivs = zip(*df.apply(
+            lambda r: classify_spec_level(r.get("Spécialité",""), r.get("Niveau","")),
+            axis=1
+        ))
+        df["Spec2"], df["Niv2"] = specs, nivs
+
+        if (df["Spec2"] == "").any() or (df["Niv2"] == "").any() or (df["Groupe"] == "").any():
+            s2_f, n2_f, g_f, sem_f = infer_from_filename(f)
+            if s2_f:  df.loc[df["Spec2"] == "", "Spec2"] = s2_f
+            if n2_f:  df.loc[df["Niv2"] == "", "Niv2"] = n2_f
+            if g_f:   df.loc[df["Groupe"] == "", "Groupe"] = normalize_groupe(g_f)
+            if sem_f: df.loc[df["Semestre"] == "", "Semestre"] = sem_f
+
+        idx_rows.append({
+            "Type": "ETU",
+            "Fichier": fname,
+            "Lu": True,
+            "Erreur": "",
+            "S1_par_nom": s1_by_name,
+            "S1_par_col": has_s1_col,
+            "Spec2": df["Spec2"].dropna().astype(str).str.upper().replace("", None).mode().tolist()[:1] or [None],
+            "Niv2": df["Niv2"].dropna().astype(str).str.upper().replace("", None).mode().tolist()[:1] or [None],
+            "Groupe": df["Groupe"].dropna().map(normalize_groupe).mode().tolist()[:1] or [None],
+        })
+
+        df = df[df["Semestre"].astype(str).str.upper() == "S1"].copy()
+        stu_frames.append(df)
+
+    etu = pd.concat(stu_frames, ignore_index=True) if stu_frames else pd.DataFrame(columns=STU_COLS + ["Spec2","Niv2"])
+
+    # --------------------- TABLE D’INDEX (pour affichage) -------------------
+    idx = pd.DataFrame(idx_rows)
+    for c in ["Spec2","Niv2","Groupe"]:
+        if c in idx.columns:
+            idx[c] = idx[c].apply(lambda v: v[0] if isinstance(v, list) and v else v)
+
+    return edt, etu, idx
+
 
 def subgroup_by_spec_level(df: pd.DataFrame, spec: Optional[str]=None,
                            niv: Optional[str]=None, groupe: Optional[str]=None) -> pd.DataFrame:
@@ -397,13 +480,35 @@ def subgroup_by_spec_level(df: pd.DataFrame, spec: Optional[str]=None,
         keep = keep[keep["Groupe"].apply(normalize_groupe) == gnorm]
     return keep
 
-# ----------------------------- UI GLOBALE -----------------------------
+
+def level_options_for(spec: str) -> Iterable[str]:
+    if spec in ("RIB","VOA","STRUCTURE"): return ["M1","M2"]
+    if spec == "LICENCE": return ["2","3"]
+    if spec == "INGENIEUR": return ["1","2","3"]
+    return []
+
+def pretty_level_label(spec: str, niv: str) -> str:
+    if spec == "LICENCE": return f"LICENCE {niv}"
+    if spec == "INGENIEUR": return f"INGENIEUR {niv}"
+    return niv
+# ============================ INTERFACE ===============================
 
 st.title("🗓️ Portail Génie Civil — EDT & Listes (S1)")
 
-edt, etu = load_raw_s1()
+edt, etu, idx = load_raw_s1()
+
+# ---- Diagnostic d’index (ce que l’appli voit exactement)
+with st.expander("📂 Index des fichiers détectés (diagnostic)", expanded=False):
+    if idx.empty:
+        st.info("Aucun fichier détecté dans `data/raw/edt/` et `data/raw/students/`.")
+    else:
+        st.dataframe(
+            idx[["Type","Fichier","Lu","S1_par_nom","S1_par_col","Spec2","Niv2","Groupe","Erreur"]],
+            hide_index=True, use_container_width=True
+        )
+
 if edt.empty:
-    st.error("Aucun EDT S1 trouvé dans `app/data/raw/edt/`.")
+    st.error("Aucun EDT S1 trouvé ou reconnu.")
     st.stop()
 
 with st.sidebar:
@@ -451,7 +556,7 @@ if print_mode:
 
 bloc = subgroup_by_spec_level(edt, spec, niv, groupe)
 
-# 🔍 Diagnostic si EDT vide
+# 🔍 Diagnostic si EDT vide pour les filtres actuels
 if bloc.empty:
     with st.expander("🔍 Diagnostic (EDT vide pour ce filtre)", expanded=False):
         df_spec = edt[edt["Spec2"] == spec]
@@ -662,7 +767,7 @@ else:
         if etu_g.empty:
             st.warning("Pas de liste trouvée pour ce groupe (vérifie 'Groupe' = G11/G12 et 'Semestre' = S1).")
         else:
-            # Colonne Nom complet, toujours visible
+            # Colonne Nom complet
             if "Nom" in etu_g.columns or "Prenom" in etu_g.columns:
                 etu_g["Nom complet"] = (etu_g.get("Nom","").astype(str).str.strip() + " " +
                                         etu_g.get("Prenom","").astype(str).str.strip()).str.strip()
