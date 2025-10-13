@@ -35,6 +35,93 @@ from reportlab.lib import colors
 # --- Timezone pour décomptes & “aujourd’hui”
 import pytz
 
+# --- Utilitaires Prochaine séance (Algérie / parsing) ---
+import datetime as _dt
+import pytz as _pytz
+
+TZ_DZ = _pytz.timezone("Africa/Algiers")
+# mapping Python weekday() -> libellé FR utilisé dans tes tableaux
+WEEKDAY_FR = ["LUNDI", "MARDI", "MERCREDI", "JEUDI", "VENDREDI", "SAMEDI", "DIMANCHE"]
+
+def now_dz():
+    """datetime 'aware' en Afrique/Alger."""
+    return _dt.datetime.now(TZ_DZ)
+
+def parse_hhmm(s: str) -> _dt.time:
+    """
+    '08h30' -> datetime.time(8,30)
+    Accepte aussi '08:30' par sécurité.
+    """
+    if not isinstance(s, str):
+        s = str(s or "")
+    s = s.strip().lower().replace(" ", "")
+    s = s.replace("h", ":")
+    if ":" not in s:
+        # ex: '8' -> '8:00'
+        s = f"{s}:00"
+    hh, mm = s.split(":", 1)
+    return _dt.time(int(hh), int(mm or 0))
+
+def enrich_times(df):
+    """Ajoute colonnes _tstart/_tend (time) et tri par Heure début."""
+    if df.empty:
+        return df.copy()
+    out = df.copy()
+    out["_tstart"] = out["Heure début"].apply(parse_hhmm)
+    out["_tend"]   = out["Heure fin"].apply(parse_hhmm)
+    out = out.sort_values(by=["_tstart", "_tend"]).reset_index(drop=True)
+    return out
+
+def pick_today_label():
+    """Libellé de jour FR (ex: 'MERCREDI') basé sur l’heure algérienne."""
+    return WEEKDAY_FR[now_dz().weekday()]
+
+def pick_current_and_next(sessions_for_day):
+    """
+    sessions_for_day: DataFrame déjà enrichi (colonnes _tstart/_tend).
+    Retourne (current_row | None, next_row | None, state_str)
+      - state_str ∈ {'ongoing','upcoming','empty','completed'}
+    """
+    if sessions_for_day.empty:
+        return None, None, "empty"
+
+    tnow = now_dz().time()
+    # séance en cours ?
+    ongoing = sessions_for_day[
+        (sessions_for_day["_tstart"] <= tnow) &
+        (tnow < sessions_for_day["_tend"])
+    ]
+    if not ongoing.empty:
+        cur = ongoing.iloc[0]
+        # la prochaine après celle en cours
+        nexts = sessions_for_day[sessions_for_day["_tstart"] > cur["_tend"]]
+        nxt = nexts.iloc[0] if not nexts.empty else None
+        return cur, nxt, "ongoing"
+
+    # pas de séance en cours: cherche la prochaine
+    nxts = sessions_for_day[sessions_for_day["_tstart"] > tnow]
+    if not nxts.empty:
+        nxt = nxts.iloc[0]
+        return None, nxt, "upcoming"
+
+    # toutes les séances du jour sont passées
+    return None, None, "completed"
+
+def fmt_hhmm(t: _dt.time) -> str:
+    return f"{t.hour:02d}h{t.minute:02d}"
+
+def td_to_hm(delta: _dt.timedelta) -> str:
+    # Retour "XhYY" ou "X min" si < 1h
+    secs = int(delta.total_seconds())
+    if secs < 0:
+        secs = 0
+    h, r = divmod(secs, 3600)
+    m, _ = divmod(r, 60)
+    if h == 0:
+        return f"{m} min"
+    return f"{h}h{m:02d}"
+
+
 # --------------------------- CONFIG GLOBALE ----------------------------
 
 st.set_page_config(
@@ -652,136 +739,83 @@ def week_schedule_for_teacher(df_all, teacher):
     sub.sort_values(["_didx","_tstart"], inplace=True)
     return sub
 
-# ========== Prochaine séance partagée (avec couleur) + sélecteur de jour ==========
+# ========== Onglet Prochaine séance ==========
+with tabs_area[1]:  # adapte si ton nom de variable diffère (ex: tab2)
+    st.subheader("Prochaine séance (Étudiant)")
 
-def _weekday_index(name: str) -> int:
-    name = str(name).strip().upper()
-    for i, d in enumerate(WEEKDAY_FR):
-        if d == name:
-            return i
-    if "AUJOUR" in name:
-        return tz_now().weekday()
-    return tz_now().weekday()
+    # On filtre d’abord EDT selon spécialité/niveau/groupe déjà choisis dans ta sidebar
+    edt_filtered = filtered_edt_df  # réutilise ta DataFrame déjà filtrée (spéc→niv→groupe)
+    if edt_filtered is None or edt_filtered.empty:
+        st.info("Aucun EDT n'est disponible pour ces filtres.")
+        st.stop()
 
-def _date_for_weekday(target_idx: int, start_dt=None):
-    if start_dt is None:
-        start_dt = tz_now()
-    cur_idx = start_dt.weekday()
-    delta = (target_idx - cur_idx) % 7
-    return (start_dt + timedelta(days=delta)).date()
+    # Ajoute colonnes temps et normalise l’EDT
+    edt_enriched = enrich_times(edt_filtered)
 
-def _to_dt_for_date(hour_str, for_date):
-    s = str(hour_str).replace("h", ":")
-    hh, mm = s.split(":")
-    hh, mm = int(hh), int(mm)
-    tz = getattr(tz_now(), "tzinfo", None)
-    return datetime.combine(for_date, time(hh, mm, 0, tzinfo=tz))
+    # Jour par défaut = jour actuel (Algérie)
+    default_day = pick_today_label()
+    all_days = WEEKDAY_FR  # ou edt_enriched['Jour'].str.upper().unique() trié si tu veux limiter aux jours présents
+    day_choice = st.selectbox("Jour", options=all_days, index=all_days.index(default_day))
 
-def current_and_next_for_specific_day(df, day_name: str):
-    if df is None or df.empty:
-        return (None, None, None)
-    C = get_cols(df)
-    target_idx = _weekday_index(day_name)
-    target_date = _date_for_weekday(target_idx)
-    target_day_name = WEEKDAY_FR[target_idx]
-    dday = df[df[C["jour"]].astype(str).str.upper().eq(target_day_name)].copy()
-    if dday.empty:
-        return (None, None, None)
-    dday["_dt_start"] = dday[C["hdeb"]].astype(str).apply(lambda s: _to_dt_for_date(s, target_date))
-    dday["_dt_end"]   = dday[C["hfin"]].astype(str).apply(lambda s: _to_dt_for_date(s, target_date))
-    dday.sort_values("_dt_start", inplace=True)
-    now = tz_now()
-    if target_date != now.date():
-        now = datetime.combine(target_date, time(0, 0, tzinfo=tz_now().tzinfo))
-    cur = dday[(dday["_dt_start"] <= now) & (now < dday["_dt_end"])].head(1)
-    nxt = dday[dday["_dt_start"] > now].head(1)
-    nxt2 = dday[dday["_dt_start"] > now].iloc[1:2]
-    return (
-        None if cur.empty else cur.iloc[0],
-        None if nxt.empty else nxt.iloc[0],
-        None if nxt2.empty else nxt2.iloc[0],
-    )
+    # Séances du jour choisi
+    day_df = edt_enriched[edt_enriched["Jour"].str.upper() == day_choice].copy()
 
-# --- Couleurs / état
-def _state_and_style(start, end, now=None):
-    if now is None:
-        now = tz_now()
-    if start <= now < end:
-        return ("ongoing", "🟢 Séance en cours", "#16a34a")  # vert
-    if now < start:
-        minutes = int((start - now).total_seconds() // 60)
-        label = f"⏱️ Dans {minutes//60}h{minutes%60:02d}"
-        color = "#f59e0b" if minutes <= 30 else "#3b82f6"   # ambre si ≤30m, sinon bleu
-        return ("soon" if minutes <= 30 else "later", label, color)
-    return ("past", f"Terminé à {end.strftime('%H:%M')}", "#6b7280")  # gris
+    cur, nxt, state = pick_current_and_next(day_df)
 
-def render_session_card(row, C, label=""):
-    """Affiche une séance avec header coloré selon l'état, et infos enseignant/salle/heure."""
-    if row is None:
-        st.warning("Aucune séance trouvée.")
-        return
-    start = _to_dt_today(str(row[C["hdeb"]]))
-    end   = _to_dt_today(str(row[C["hfin"]]))
-    now   = tz_now()
-    state, state_label, color = _state_and_style(start, end, now)
+    # helpers d’affichage
+    def block_session(row, headline="Séance", color="#4F7BFE"):
+        mat = str(row["Matière"])
+        typ = str(row.get("Type", "") or "").strip()
+        teach = str(row.get("Enseignant", "") or "")
+        salle = str(row.get("Salle", "") or "")
+        t1, t2 = row["_tstart"], row["_tend"]
 
-    if state in ("soon", "later"):
-        extra = f"(de {start.strftime('%H:%M')} à {end.strftime('%H:%M')})"
-        foot  = f"{state_label} {extra}"
+        st.markdown(
+            f"""
+            <div style="background:{color};color:white;border-radius:10px;padding:10px 14px;margin-top:8px;">
+              <strong>{mat} ({typ})</strong><br/>
+              👨‍🏫 {teach} &nbsp; • &nbsp; 🏫 Salle {salle} &nbsp; • &nbsp; 📅 {day_choice}<br/>
+              🕒 {fmt_hhmm(t1)} – {fmt_hhmm(t2)}
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    # Affichage logique
+    st.caption("Prochaine séance")
+
+    now_local = now_dz()
+    if state == "empty":
+        st.warning(f"Aucune séance planifiée pour {day_choice}.")
     elif state == "ongoing":
-        foot = state_label + f" • fin à {end.strftime('%H:%M')}"
-    else:
-        foot = state_label
+        # séance en cours
+        block_session(cur, headline="Séance en cours", color="#16a34a")  # vert
+        # temps restant
+        end_dt = now_local.replace(hour=cur["_tend"].hour, minute=cur["_tend"].minute, second=0, microsecond=0)
+        left = end_dt - now_local
+        st.markdown(f"⏱ **En cours** — reste **{td_to_hm(left)}** (de {fmt_hhmm(cur['_tstart'])} à {fmt_hhmm(cur['_tend'])}).")
 
-    st.markdown(
-        f"""
-        <div class="session-card">
-          <div class="session-head" style="background:{color};">
-            {row[C["mat"]]} <span style="opacity:.92;">({row[C["typ"]]})</span>
-          </div>
-          <div class="session-body">
-            👨‍🏫 {row[C["ens"]]} &nbsp;•&nbsp; 🏫 Salle {row[C["sal"]]} &nbsp;•&nbsp; 📅 {row[C["jour"]]}
-          </div>
-          <div class="session-foot">
-            <em>{foot}</em>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-def render_next_sessions_shared(bloc_df, title="Prochaine séance"):
-    """Composant commun (étudiant & enseignant) avec sélecteur de jour."""
-    st.subheader(title)
-    if bloc_df is None or bloc_df.empty:
-        st.info("Aucune donnée pour ce filtre.")
-        return
-    C = get_cols(bloc_df)
-    jours_options = ["Aujourd'hui"] + WEEKDAY_FR
-    chosen = st.selectbox("Jour", jours_options, index=0, key=f"nx_day_{title}")
-    if chosen == "Aujourd'hui":
-        cur, nxt, nxt2 = current_and_next_for_day(bloc_df)
-    else:
-        cur, nxt, nxt2 = current_and_next_for_specific_day(bloc_df, chosen)
-
-    if cur is not None:
-        st.caption("Séance actuelle")
-        render_session_card(cur, C, "now")
+        st.markdown("**Après :**")
         if nxt is not None:
-            st.caption("Puis")
-            render_session_card(nxt, C, "next")
-        elif nxt2 is not None:
-            st.caption("Puis")
-            render_session_card(nxt2, C, "next2")
-    else:
-        st.caption("Prochaine séance")
-        if nxt is not None:
-            render_session_card(nxt, C, "next")
-            if nxt2 is not None:
-                st.caption("Après")
-                render_session_card(nxt2, C, "next2")
+            block_session(nxt, headline="Prochaine", color="#4F7BFE")
+            start_dt = now_local.replace(hour=nxt["_tstart"].hour, minute=nxt["_tstart"].minute, second=0, microsecond=0)
+            st.caption(f"🗓 Dans **{td_to_hm(start_dt - now_local)}** (début {fmt_hhmm(nxt['_tstart'])}).")
         else:
-            st.info("Pas d’autre séance pour ce jour.")
+            st.info("Aucune autre séance après celle en cours.")
+    elif state == "upcoming":
+        # prochaine séance à venir
+        block_session(nxt, headline="Prochaine", color="#4F7BFE")
+        start_dt = now_local.replace(hour=nxt["_tstart"].hour, minute=nxt["_tstart"].minute, second=0, microsecond=0)
+        st.caption(f"🗓 Dans **{td_to_hm(start_dt - now_local)}** (de {fmt_hhmm(nxt['_tstart'])} à {fmt_hhmm(nxt['_tend'])}).")
+        # Bonus: montre aussi la suivante après celle-là
+        rest = day_df[day_df["_tstart"] > nxt["_tstart"]]
+        if not rest.empty:
+            st.markdown("**Après :**")
+            nxt2 = rest.iloc[0]
+            block_session(nxt2, headline="Ensuite", color="#7c3aed")  # violet
+    else:  # completed
+        st.info(f"Toutes les séances de **{day_choice}** sont terminées.")
+
 # ============================ INTERFACE ===============================
 
 st.title("🗓️ Portail Génie Civil — EDT & Listes (S1)")
