@@ -1,4 +1,4 @@
-# streamlit_app.py — PART 1/6
+# streamlit_app.py — PARTIE 1/6
 
 import os
 import re
@@ -11,19 +11,19 @@ from typing import Dict, Tuple, Optional, List
 import pandas as pd
 import streamlit as st
 
-# PDF presence
+# PDF (feuille de présence)
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import cm
 
-# ---------------- Page config
+# ----- Page config
 st.set_page_config(
     page_title="Portail Génie Civil — EDT & Listes (S1)",
     page_icon="🗓️",
     layout="wide",
 )
 
-# ---------------- Styles
+# ----- Styles
 st.markdown(
     """
     <style>
@@ -45,12 +45,12 @@ st.markdown(
 def chip(txt, cls="chip-blue"):
     return f'<span class="chip {cls}">{txt}</span>'
 
-# ---------------- Dossiers
+# ----- Dossiers
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 EDT_DIR  = os.path.join(BASE_DIR, "data", "raw", "edt")
 STUD_DIR = os.path.join(BASE_DIR, "data", "raw", "students")
 
-# ---------------- Temps (Algérie)
+# ----- Temps (Algérie)
 TZ_DZ = pytz.timezone("Africa/Algiers")
 WEEKDAY_FR = ["LUNDI", "MARDI", "MERCREDI", "JEUDI", "VENDREDI", "SAMEDI", "DIMANCHE"]
 
@@ -86,31 +86,51 @@ def enrich_times(df: pd.DataFrame) -> pd.DataFrame:
     out["_tend"]   = out["Heure fin"].apply(parse_hhmm)
     return out.sort_values(by=["_tstart","_tend"]).reset_index(drop=True)
 
+# Colonnes minimales pour l’affichage EDT
 MIN_COLS = ["Jour","Heure début","Heure fin","Matière","Enseignant","Salle"]
-# streamlit_app.py — PART 2/6
+# streamlit_app.py — PARTIE 2/6
 
+# --- Détection robuste de la spécialité à partir du nom de fichier
 def norm_spec_from_filename(name: str) -> Optional[str]:
-    s = re.sub(r"[^a-zA-Z0-9]+", " ", name.upper())
+    """
+    Détecte la spécialité dans le nom de fichier.
+    Compatible avec : 1ING, 2ING, 3ING, ING, INGENIEUR, RIB, VOA, STR/STRUCTURE, LICENCE/L2/L3.
+    Exemples : EDT_1ING_G11_S1.xlsx, EDT_2ING_G12_S1.xlsx, EDT_3ING_G11_S1.xlsx
+    """
+    s = re.sub(r"[^A-Z0-9]+", " ", name.upper())
     toks = s.split()
-    if "RIB" in toks: return "RIB"
-    if "VOA" in toks: return "VOA"
-    if "STR" in toks or "STRUCTURE" in toks: return "STRUCTURE"
-    # forcer INGENIEUR même si forme "ING" / "INGENIEUR"
-    if "INGENIEUR" in toks or "ING" in toks: return "INGENIEUR"
-    if "LICENCE" in toks or "L2" in toks or "L3" in toks: return "LICENCE"
+
+    if "RIB" in toks:
+        return "RIB"
+    if "VOA" in toks:
+        return "VOA"
+    if "STR" in toks or "STRUCTURE" in toks:
+        return "STRUCTURE"
+    if "LICENCE" in toks or "L2" in toks or "L3" in toks:
+        return "LICENCE"
+
+    # INGENIEUR : formes abrégées ou complètes
+    if any(x in s for x in ["1ING", "2ING", "3ING", "INGENIEUR", " ING "]):
+        return "INGENIEUR"
+
     return None
 
+# --- Détection du niveau
 def norm_level_from_filename(name: str) -> Optional[str]:
-    s = re.sub(r"[^a-zA-Z0-9]+", " ", name.upper())
-    if "L2" in s: return "LICENCE 2"
-    if "L3" in s: return "LICENCE 3"
-    if "1ING" in s or "ING1" in s: return "INGENIEUR 1"
-    if "2ING" in s or "ING2" in s: return "INGENIEUR 2"
-    if "3ING" in s or "ING3" in s: return "INGENIEUR 3"
+    s = re.sub(r"[^A-Z0-9]+", " ", name.upper())
+    # licence
+    if "L2" in s or "LICENCE 2" in s: return "LICENCE 2"
+    if "L3" in s or "LICENCE 3" in s: return "LICENCE 3"
+    # ingénieur (tolère plusieurs formes)
+    if any(x in s for x in ["1ING", "ING1", "INGENIEUR1", "ING 1", "1 ING"]): return "INGENIEUR 1"
+    if any(x in s for x in ["2ING", "ING2", "INGENIEUR2", "ING 2", "2 ING"]): return "INGENIEUR 2"
+    if any(x in s for x in ["3ING", "ING3", "INGENIEUR3", "ING 3", "3 ING"]): return "INGENIEUR 3"
+    # masters
     if "M1" in s: return "M1"
     if "M2" in s: return "M2"
     return None
 
+# --- Détection du groupe
 def norm_group_from_filename(name: str) -> Optional[str]:
     s = name.upper()
     if re.search(r"\bG11\b", s): return "G11"
@@ -133,6 +153,7 @@ def load_all_edt() -> pd.DataFrame:
         except Exception:
             continue
 
+        # mappage colonnes
         colmap = {}
         for c in df.columns:
             cu = str(c).strip().lower()
@@ -144,10 +165,11 @@ def load_all_edt() -> pd.DataFrame:
             elif "enseign" in cu or "prof" in cu: colmap[c] = "Enseignant"
             elif "salle" in cu or "local" in cu: colmap[c] = "Salle"
             elif "fréq" in cu or "freq" in cu: colmap[c] = "Fréquence"
+
         df = df.rename(columns=colmap)
 
         must = ["Jour","Heure début","Heure fin","Matière","Type","Enseignant","Salle"]
-        if not all(m in df.columns for m in must):  # fichier incomplet
+        if not all(m in df.columns for m in must):
             continue
 
         df["Spécialité"] = spec
@@ -159,7 +181,7 @@ def load_all_edt() -> pd.DataFrame:
         rows.append(df[keep])
 
     if not rows:
-        return pd.DataFrame(columns=keep)
+        return pd.DataFrame(columns=["Jour","Heure début","Heure fin","Matière","Enseignant","Salle","Type","Spécialité","Niveau","Groupe"])
     return pd.concat(rows, ignore_index=True)
 
 @st.cache_data(show_spinner=False)
@@ -199,7 +221,7 @@ EDT_ALL  = load_all_edt()
 STUD_ALL = load_all_students()
 
 def options_by_hierarchy():
-    # ordre logique
+    # ordre d’affichage — INGENIEUR en premier
     spec_order = ["INGENIEUR","LICENCE","RIB","VOA","STRUCTURE"]
     specs = []
     for s in spec_order:
@@ -245,7 +267,7 @@ def filtered_edt_scope(spec, level, scope: str, group: Optional[str]) -> pd.Data
 
 def student_list_for(spec, level, group) -> pd.DataFrame:
     return STUD_ALL.get((spec, level, group), pd.DataFrame(columns=["Nom affiché"]))
-# streamlit_app.py — PART 3/6
+# streamlit_app.py — PARTIE 3/6
 
 def filter_area():
     st.sidebar.subheader("🔎 Mode d’accès")
@@ -283,20 +305,18 @@ def export_xlsx_bytes(df: pd.DataFrame, sheet_name="Feuille"):
         df.to_excel(xw, index=False, sheet_name=sheet_name)
     buf.seek(0)
     return buf
-# streamlit_app.py — PART 4/6
+# streamlit_app.py — PARTIE 4/6
 
 def df_minimal(df: pd.DataFrame) -> pd.DataFrame:
-    # colonnes utiles uniquement
     keep = [c for c in MIN_COLS if c in df.columns]
-    out = df[keep].copy()
-    return out
+    return df[keep].copy()
 
 def card_session(row, day_label, color="#4F7BFE"):
     t1, t2 = row["_tstart"], row["_tend"]
     st.markdown(
         f"""
         <div class="linecard" style="background:{color}">
-          <strong>{row['Matière']}</strong><span class="pill"> {row.get('Type','Cours')} </span><br/>
+          <strong>{row['Matière']}</strong> <span class="pill">{row.get('Type','Cours')}</span><br/>
           👨‍🏫 {row.get('Enseignant','')} &nbsp; • &nbsp; 🏫 Salle {row.get('Salle','')} &nbsp; • &nbsp; 📅 {day_label}<br/>
           🕒 {fmt_hhmm(t1)} – {fmt_hhmm(t2)}
         </div>
@@ -335,6 +355,8 @@ def render_student_ui(spec, level, group, search_name):
             st.info("Aucun EDT pour ces filtres.")
             return
         dfe = enrich_times(df)
+
+        # Jour proposé = jour réel (fuseau DZ)
         the_day = st.selectbox("Jour", WEEKDAY_FR, index=WEEKDAY_FR.index(pick_today_label()))
         day_df = dfe[dfe["Jour"].str.upper()==the_day].copy()
 
@@ -369,7 +391,7 @@ def render_student_ui(spec, level, group, search_name):
             st.caption(f"🗓 Dans **{td_to_hm(start_dt - now_local)}** (de {fmt_hhmm(nxt['_tstart'])} à {fmt_hhmm(nxt['_tend'])}).")
         else:
             st.info(f"Toutes les séances de **{the_day}** sont terminées.")
-# streamlit_app.py — PART 5/6
+# streamlit_app.py — PARTIE 5/6
 
 def weekly_teacher_view(df_scope: pd.DataFrame, teacher: str) -> pd.DataFrame:
     if df_scope.empty: return df_scope
@@ -408,7 +430,7 @@ def render_teacher_ui(spec, level, group, search_name):
     df_group = filtered_edt(spec, level, group)
     tabs = st.tabs(["🗂️ Planning (ce groupe)", "🧭 Où trouver un enseignant ?", "📝 Feuille de présence"])
 
-    # --- Planning groupe (colonnes minimales)
+    # --- Planning (colonnes minimales)
     with tabs[0]:
         st.subheader("Planning — Ce groupe")
         if df_group.empty:
@@ -424,7 +446,7 @@ def render_teacher_ui(spec, level, group, search_name):
             )
             st.dataframe(dfv, use_container_width=True, height=480)
 
-    # --- Où trouver un enseignant ? (liste complète + périmètre)
+    # --- Où trouver un enseignant ? (périmètre groupe / spécialité-niveau)
     with tabs[1]:
         st.subheader("Où trouver un enseignant ? (hebdomadaire)")
         perimeter = st.radio(
@@ -480,7 +502,7 @@ def render_teacher_ui(spec, level, group, search_name):
         def set_all(val: bool):
             for n in stud["Nom affiché"].tolist():
                 st.session_state[key_state][n] = val
-            st.rerun()
+            st.rerun()  # <-- garantit l’update visuelle immédiate
 
         c1, c2 = st.columns(2)
         with c1:
@@ -488,7 +510,6 @@ def render_teacher_ui(spec, level, group, search_name):
         with c2:
             st.button("❌ Tout décocher", use_container_width=True, on_click=set_all, args=(False,))
 
-        # filtrage nom
         s = q.strip().lower()
         view = stud.copy()
         if s:
@@ -521,7 +542,7 @@ def render_teacher_ui(spec, level, group, search_name):
                 })
             st.dataframe(pd.DataFrame(data), use_container_width=True, height=480)
 
-        # ----- Export PDF (en-tête Université / Fac / Département)
+        # ----- Export PDF
         def build_presence_pdf() -> bytes:
             buffer = io.BytesIO()
             c = canvas.Canvas(buffer, pagesize=A4)
@@ -551,6 +572,20 @@ def render_teacher_ui(spec, level, group, search_name):
                 remk = st.session_state[key_remark].get(name, "")
                 if y < margin + 40:
                     c.showPage(); y = H - margin
+                    # répéter l’en-tête si multi-pages
+                    c.setFont("Helvetica-Bold", 12); c.drawString(x, y, "UNIVERSITÉ DE TLEMCEN"); y -= 16
+                    c.setFont("Helvetica-Bold", 11); c.drawString(x, y, "FACULTÉ DE TECHNOLOGIE"); y -= 14
+                    c.setFont("Helvetica-Bold", 11); c.drawString(x, y, "DÉPARTEMENT DE GÉNIE CIVIL"); y -= 18
+                    c.setFont("Helvetica", 10)
+                    c.drawString(x, y, f"Spécialité : {spec}    Niveau : {level}    Groupe : {group}"); y -= 14
+                    c.line(x, y, W - margin, y); y -= 16
+                    c.setFont("Helvetica-Bold", 10)
+                    c.drawString(x, y, "N°"); c.drawString(x+20, y, "Nom & Prénom")
+                    c.drawString(W - margin - 130, y, "Remarque")
+                    c.drawString(W - margin - 30, y, "Présent")
+                    y -= 12; c.line(x, y, W - margin, y); y -= 10
+                    c.setFont("Helvetica", 10)
+
                 c.drawString(x, y, str(i)); c.drawString(x+20, y, name[:50])
                 c.drawString(W - margin - 130, y, remk[:28])
                 c.drawString(W - margin - 30, y, "✓" if pres else "✗")
@@ -566,7 +601,7 @@ def render_teacher_ui(spec, level, group, search_name):
             mime="application/pdf",
             use_container_width=True
         )
-# streamlit_app.py — PART 6/6
+# streamlit_app.py — PARTIE 6/6
 
 def main():
     mode, spec, level, group, search_name = filter_area()
