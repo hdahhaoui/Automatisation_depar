@@ -699,13 +699,61 @@ def pdf_presence(spec: str, level: str, group: str, df_presence: pd.DataFrame) -
     return buf.getvalue()
 
 
+def resolve_students_key(
+    students_map: Dict[Tuple[str, str, str], pd.DataFrame],
+    spec: str,
+    level: str,
+    group: str,
+) -> Optional[Tuple[str, str, str]]:
+    """Trouve la meilleure clé de liste étudiants disponible pour un filtre donné.
+
+    L'algorithme privilégie d'abord une correspondance exacte, puis les clés
+    partageant la même spécialité en maximisant les correspondances sur le niveau
+    et le groupe. Cela permet, par exemple, de retomber sur la liste M1 RIB si la
+    liste M2 RIB n'est pas fournie.
+    """
+
+    exact_key = (spec, level, group)
+    if exact_key in students_map:
+        return exact_key
+
+    # Filtrer uniquement les clés de la même spécialité.
+    same_spec_keys = [key for key in students_map.keys() if key[0] == spec]
+    if not same_spec_keys:
+        return None
+
+    def score(key: Tuple[str, str, str]) -> Tuple[int, int]:
+        _, lvl, grp = key
+        # Priorité au niveau identique (poids 2) puis au groupe identique (poids 1).
+        lvl_score = 1 if lvl == level else 0
+        grp_score = 1 if grp == group else 0
+        return (lvl_score * 2 + grp_score, grp_score)
+
+    best_key = max(same_spec_keys, key=score)
+    if students_map.get(best_key) is None or students_map[best_key].empty:
+        return None
+    return best_key
+
+
 def render_presence(spec: str, level: str, group: str, students_map: Dict[Tuple[str,str,str], pd.DataFrame]):
     st.subheader("Feuille de présence (enseignant)")
 
-    stud = students_map.get((spec, level, group))
+    students_key = resolve_students_key(students_map, spec, level, group)
+    if not students_key:
+        st.warning("Aucune liste d'étudiants détectée pour ce groupe.")
+        return
+
+    stud = students_map.get(students_key)
     if stud is None or stud.empty:
         st.warning("Aucune liste d'étudiants détectée pour ce groupe.")
         return
+
+    if students_key != (spec, level, group):
+        alt_spec, alt_level, alt_group = students_key
+        st.info(
+            "Liste d'étudiants introuvable pour "
+            f"{spec} {level} {group}. Utilisation de {alt_spec} {alt_level} {alt_group}."
+        )
 
     stud = stud.copy().reset_index(drop=True)
     for col in ["Nom", "Prénom", "Nom complet"]:
