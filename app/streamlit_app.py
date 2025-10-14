@@ -728,29 +728,41 @@ def pdf_presence(spec: str, level: str, group: str, df_presence: pd.DataFrame) -
     c.setFont("Helvetica", 10)
     c.drawString(2 * cm, h - 5.1 * cm, f"Date / Heure : {dt}")
 
-    # Tableau : Nom complet | Présent | Remarque
+    # Tableau : Nom | Prénom | Présent | Remarque
     y = h - 6 * cm
     c.setFont("Helvetica-Bold", 10)
-    c.drawString(2 * cm, y, "Nom complet")
-    c.drawString(12 * cm, y, "Présent")
-    c.drawString(15 * cm, y, "Remarque")
+    x_nom = 2 * cm
+    x_prenom = 8.5 * cm
+    x_present = 14.5 * cm
+    x_remarque = 17 * cm
+
+    c.drawString(x_nom, y, "Nom")
+    c.drawString(x_prenom, y, "Prénom")
+    c.drawString(x_present, y, "Présent")
+    c.drawString(x_remarque, y, "Remarque")
     y -= 0.6 * cm
     c.setFont("Helvetica", 10)
 
     for _, r in df_presence.iterrows():
-        nom = str(r.get("Nom", "") or "")
-        prenom = str(r.get("Prénom", "") or "")
-        full = str(r.get("Nom complet", "") or "").strip()
-        if not full:
-            full = (nom + " " + prenom).strip()
+        nom = str(r.get("Nom", "") or "").strip()
+        prenom = str(r.get("Prénom", "") or "").strip()
+        if not nom or not prenom:
+            full = str(r.get("Nom complet", "") or "").strip()
+            if full:
+                parts = full.split(None, 1)
+                if not nom and parts:
+                    nom = parts[0]
+                if not prenom and len(parts) > 1:
+                    prenom = parts[1]
         present = "Oui" if r["Présent"] else "Non"
         rem = str(r.get("Remarque","") or "")
         if y < 2 * cm:
             c.showPage()
             y = h - 2 * cm
-        c.drawString(2 * cm, y, full[:45])
-        c.drawString(12 * cm, y, present)
-        c.drawString(15 * cm, y, rem[:35])
+        c.drawString(x_nom, y, nom[:18])
+        c.drawString(x_prenom, y, prenom[:18])
+        c.drawString(x_present, y, present)
+        c.drawString(x_remarque, y, rem[:28])
         y -= 0.5 * cm
 
     c.showPage()
@@ -934,14 +946,29 @@ def render_presence(spec: str, level: str, group: str, students_map: Dict[Tuple[
                 )
                 st.session_state[key_rem][ident] = st.session_state.get((key_rem, ident), txt)
 
-    # Construire DataFrame présence
+    # Construire DataFrame présence (en veillant à disposer de Nom et Prénom)
+    def _names_for_row(row: pd.Series) -> Tuple[str, str, str]:
+        last = str(row.get("Nom", "") or "").strip()
+        first = str(row.get("Prénom", "") or "").strip()
+        full = str(row.get("Nom complet", "") or "").strip()
+        if (not last or not first) and full:
+            parts = full.split(None, 1)
+            if not last and parts:
+                last = parts[0].strip()
+            if not first and len(parts) > 1:
+                first = parts[1].strip()
+        if not full:
+            full = (last + " " + first).strip()
+        return last, first, full
+
     pres_rows = []
     for _, row in show.iterrows():
         ident = row["__id"]
+        last, first, full = _names_for_row(row)
         pres_rows.append({
-            "Nom": row["Nom"].strip(),
-            "Prénom": row["Prénom"].strip(),
-            "Nom complet": row["Nom complet"].strip(),
+            "Nom": last,
+            "Prénom": first,
+            "Nom complet": full,
             "Présent": bool(st.session_state[key_state].get(ident, False)),
             "Remarque": st.session_state[key_rem].get(ident, ""),
         })
