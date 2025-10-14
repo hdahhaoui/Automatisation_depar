@@ -204,6 +204,99 @@ def norm_group_from_filename(fname: str) -> Optional[str]:
     return None
 
 
+def normalize_spec_label(value: Optional[str]) -> Optional[str]:
+    """Normalise une valeur libre représentant une spécialité."""
+
+    if value is None:
+        return None
+    value = str(value).strip()
+    if not value:
+        return None
+
+    # Essaye d'abord les heuristiques côté nom de fichier.
+    spec = norm_spec_from_filename(value)
+    if spec:
+        return spec
+
+    s = value.upper()
+    if "RIB" in s:
+        return "RIB"
+    if "VOA" in s:
+        return "VOA"
+    if "STR" in s or "STRUCTURE" in s:
+        return "STRUCTURE"
+    if "LICENCE" in s or s in {"L2", "L3"}:
+        return "LICENCE"
+    if any(token in s for token in ["ING", "INGENIEUR", "GÉNIE CIVIL", "GENIE CIVIL"]):
+        return "INGENIEUR"
+    return None
+
+
+def normalize_level_label(value: Optional[str]) -> Optional[str]:
+    """Normalise une valeur libre représentant un niveau (M1, Master 2, …)."""
+
+    if value is None:
+        return None
+    value = str(value).strip()
+    if not value:
+        return None
+
+    # Heuristique commune aux noms de fichiers (Master 2.xlsx, …).
+    lvl = norm_level_from_filename(value)
+    if lvl:
+        return lvl
+
+    cleaned = re.sub(r"[\s_\-]", "", value.upper())
+    if cleaned in {"L2", "LICENCE2"}:
+        return "LICENCE 2"
+    if cleaned in {"L3", "LICENCE3"}:
+        return "LICENCE 3"
+    if cleaned in {"1ING", "ING1", "INGENIEUR1", "1INGENIEUR"}:
+        return "INGENIEUR 1"
+    if cleaned in {"2ING", "ING2", "INGENIEUR2", "2INGENIEUR"}:
+        return "INGENIEUR 2"
+    if cleaned in {"3ING", "ING3", "INGENIEUR3", "3INGENIEUR"}:
+        return "INGENIEUR 3"
+    if cleaned in {"M1", "MASTER1"}:
+        return "M1"
+    if cleaned in {"M2", "MASTER2"}:
+        return "M2"
+    return None
+
+
+def normalize_group_label(value: Optional[str]) -> Optional[str]:
+    """Normalise une valeur libre représentant un groupe (G11/G12)."""
+
+    if value is None:
+        return None
+    value = str(value).strip()
+    if not value:
+        return None
+
+    grp = norm_group_from_filename(value)
+    if grp:
+        return grp
+
+    s = value.upper()
+    if "G11" in s:
+        return "G11"
+    if "G12" in s:
+        return "G12"
+    return None
+
+
+def normalize_triplet(
+    spec: Optional[str], level: Optional[str], group: Optional[str]
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Normalise (spécialité, niveau, groupe) pour comparer les clés."""
+
+    return (
+        normalize_spec_label(spec) or (spec.strip() if isinstance(spec, str) else spec),
+        normalize_level_label(level) or (level.strip() if isinstance(level, str) else level),
+        normalize_group_label(group) or (group.strip() if isinstance(group, str) else group),
+    )
+
+
 # ------------------------------
 # CHARGEMENT EDT
 # ------------------------------
@@ -307,33 +400,6 @@ def load_all_students() -> Dict[Tuple[str,str,str], pd.DataFrame]:
     d'abord via le nom de fichier, puis via le CONTENU (colonnes Spécialité/Niveau/Groupe)
     si le nom de fichier n'est pas assez parlant.
     """
-    def norm_spec_from_value(val: str) -> Optional[str]:
-        s = (val or "").strip().upper()
-        if "RIB" in s: return "RIB"
-        if "VOA" in s: return "VOA"
-        if "STR" in s or "STRUCTURE" in s: return "STRUCTURE"
-        if "LICENCE" in s or s in {"L2","L3"}: return "LICENCE"
-        if "ING" in s or "INGENIEUR" in s or "GÉNIE CIVIL" in s or "GENIE CIVIL" in s: return "INGENIEUR"
-        return None
-
-    def norm_level_from_value(val: str) -> Optional[str]:
-        s = (val or "").strip().upper().replace(" ", "")
-        cleaned = re.sub(r"[\s_\-]", "", s)
-        if cleaned in {"L2","LICENCE2"}: return "LICENCE 2"
-        if cleaned in {"L3","LICENCE3"}: return "LICENCE 3"
-        if cleaned in {"1ING","ING1","INGENIEUR1","1INGENIEUR"}: return "INGENIEUR 1"
-        if cleaned in {"2ING","ING2","INGENIEUR2","2INGENIEUR"}: return "INGENIEUR 2"
-        if cleaned in {"3ING","ING3","INGENIEUR3","3INGENIEUR"}: return "INGENIEUR 3"
-        if cleaned in {"M1","MASTER1"}: return "M1"
-        if cleaned in {"M2","MASTER2"}: return "M2"
-        return None
-
-    def norm_group_from_value(val: str) -> Optional[str]:
-        s = (val or "").strip().upper()
-        if "G11" in s: return "G11"
-        if "G12" in s: return "G12"
-        return None
-
     out: Dict[Tuple[str,str,str], pd.DataFrame] = {}
 
     for path in sorted(glob.glob(os.path.join(STUD_DIR, "*.xlsx"))):
@@ -370,11 +436,11 @@ def load_all_students() -> Dict[Tuple[str,str,str], pd.DataFrame]:
 
         # 4) passe contenu
         if spec is None and "Col_Spécialité" in df.columns:
-            spec = norm_spec_from_value(df["Col_Spécialité"].dropna().astype(str).iloc[0])
+            spec = normalize_spec_label(df["Col_Spécialité"].dropna().astype(str).iloc[0])
         if level is None and "Col_Niveau" in df.columns:
-            level = norm_level_from_value(df["Col_Niveau"].dropna().astype(str).iloc[0])
+            level = normalize_level_label(df["Col_Niveau"].dropna().astype(str).iloc[0])
         if group is None and "Col_Groupe" in df.columns:
-            group = norm_group_from_value(df["Col_Groupe"].dropna().astype(str).iloc[0])
+            group = normalize_group_label(df["Col_Groupe"].dropna().astype(str).iloc[0])
 
         # 5) normalisation noms
         base = df.copy()
@@ -420,21 +486,15 @@ def load_all_students() -> Dict[Tuple[str,str,str], pd.DataFrame]:
         if not spec or not level or not group:
             if not spec:
                 text = " ".join(df.columns.astype(str)).upper()
-                spec = "INGENIEUR" if "ING" in text else ("LICENCE" if "L" in text else None)
+                spec = normalize_spec_label(text)
             if not level:
                 text = df.get("Col_Niveau","").astype(str).str.upper().str.cat(sep=" ")
-                if "1" in text and "ING" in text: level = "INGENIEUR 1"
-                elif "2" in text and "ING" in text: level = "INGENIEUR 2"
-                elif "3" in text and "ING" in text: level = "INGENIEUR 3"
-                elif "L2" in text: level = "LICENCE 2"
-                elif "L3" in text: level = "LICENCE 3"
-                elif re.search(r"M\s*[-_]?\s*1|MASTER\s*1", text):
-                    level = "M1"
-                elif re.search(r"M\s*[-_]?\s*2|MASTER\s*2", text):
-                    level = "M2"
+                level = normalize_level_label(text)
             if not group:
                 text = df.get("Col_Groupe","").astype(str).str.upper().str.cat(sep=" ")
-                group = "G11" if "G11" in text else ("G12" if "G12" in text else None)
+                group = normalize_group_label(text)
+
+        spec, level, group = normalize_triplet(spec, level, group)
 
         if not spec or not level or not group:
             continue
@@ -713,20 +773,22 @@ def resolve_students_key(
     liste M2 RIB n'est pas fournie.
     """
 
-    exact_key = (spec, level, group)
+    norm_spec, norm_level, norm_group = normalize_triplet(spec, level, group)
+
+    exact_key = (norm_spec, norm_level, norm_group)
     if exact_key in students_map:
         return exact_key
 
     # Filtrer uniquement les clés de la même spécialité.
-    same_spec_keys = [key for key in students_map.keys() if key[0] == spec]
+    same_spec_keys = [key for key in students_map.keys() if key[0] == norm_spec]
     if not same_spec_keys:
         return None
 
     def score(key: Tuple[str, str, str]) -> Tuple[int, int]:
         _, lvl, grp = key
         # Priorité au niveau identique (poids 2) puis au groupe identique (poids 1).
-        lvl_score = 1 if lvl == level else 0
-        grp_score = 1 if grp == group else 0
+        lvl_score = 1 if lvl == norm_level else 0
+        grp_score = 1 if grp == norm_group else 0
         return (lvl_score * 2 + grp_score, grp_score)
 
     best_key = max(same_spec_keys, key=score)
@@ -748,7 +810,8 @@ def render_presence(spec: str, level: str, group: str, students_map: Dict[Tuple[
         st.warning("Aucune liste d'étudiants détectée pour ce groupe.")
         return
 
-    if students_key != (spec, level, group):
+    normalized_filters = normalize_triplet(spec, level, group)
+    if students_key != normalized_filters:
         alt_spec, alt_level, alt_group = students_key
         st.info(
             "Liste d'étudiants introuvable pour "
