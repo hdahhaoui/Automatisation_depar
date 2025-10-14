@@ -236,6 +236,19 @@ def map_edt_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def default_levels_for_spec(spec: Optional[str]) -> List[str]:
+    """Retourne la liste de niveaux par défaut attendus pour une spécialité."""
+    spec = (spec or "").upper()
+    mapping = {
+        "INGENIEUR": ["INGENIEUR 1", "INGENIEUR 2", "INGENIEUR 3"],
+        "LICENCE": ["LICENCE 2", "LICENCE 3"],
+        "RIB": ["M1", "M2"],
+        "VOA": ["M1", "M2"],
+        "STRUCTURE": ["M1", "M2"],
+    }
+    return mapping.get(spec, ["M1", "M2"])
+
+
 @st.cache_data(show_spinner=False)
 def load_all_edt() -> Dict[Tuple[str, str, str], pd.DataFrame]:
     """Retourne {(spec, level, group): df_edt} pour toutes les feuilles EDT trouvées."""
@@ -263,7 +276,9 @@ def load_all_edt() -> Dict[Tuple[str, str, str], pd.DataFrame]:
             if not spec:
                 spec = norm_spec_from_filename(text) or "INGENIEUR"
             if not level:
-                level = norm_level_from_filename(text) or "INGENIEUR 1"
+                detected = norm_level_from_filename(text)
+                default_level = default_levels_for_spec(spec)[0]
+                level = detected or default_level
             if not group:
                 group = norm_group_from_filename(text) or "G11"
 
@@ -425,7 +440,7 @@ def render_filters(filters_map: Dict[str, Dict[str, List[str]]]) -> Tuple[str, s
 
     levels = filters_map.get(spec, {}).get("levels", [])
     if not levels:
-        levels = ["INGENIEUR 1","INGENIEUR 2","INGENIEUR 3"] if spec=="INGENIEUR" else (["LICENCE 2","LICENCE 3"] if spec=="LICENCE" else ["M1","M2"])
+        levels = default_levels_for_spec(spec)
     level = col.selectbox("Niveau", levels, index=0)
 
     groups = filters_map.get(spec, {}).get("groups", [])
