@@ -1,1129 +1,685 @@
-# ======================================================================
-# Portail Génie Civil — EDT & Listes (S1)
-# Fichier : app/streamlit_app.py
-# ======================================================================
-# - Profils Étudiant / Enseignant
-# - Filtres Spécialité → Niveau → Groupe
-# - Normalisation EDT & listes étudiants (S1)
-# - Inférence robuste depuis nom de fichier (ING2/2ING, etc.)
-# - Exports Excel (.xlsx) pour EDT/Planning
-# - Feuille de présence mobile (sans matricule) + Remarque + Tout cocher/décocher
-# - Export PDF présence avec en-tête institutionnel UABT
-# - Prochaine séance (partagé) + bandeau coloré + sélecteur de jour
-# - Planning : filtre par Salle
-# - Annuaire enseignants (hebdomadaire + salles)
-# ======================================================================
-
-from __future__ import annotations
-
+# streamlit_app.py  — PART 1/6
+import os
 import re
+import io
+import sys
 import glob
-from io import BytesIO
-from datetime import datetime, timedelta, time as dtime, time
-from pathlib import Path
-from typing import Tuple, Optional, Iterable, Dict, Any
+import time
+import math
+import uuid
+import json
+import pytz
+import base64
+import random
+import datetime as dt
+from typing import Dict, Tuple, Optional
 
 import pandas as pd
 import streamlit as st
 
-# --- PDF (présence)
 from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import cm
-from reportlab.lib import colors
 
-# --- Timezone pour décomptes & “aujourd’hui”
-import pytz
+# ---------- Thème & options ----------
+st.set_page_config(
+    page_title="Portail Génie Civil — EDT & Listes (S1)",
+    page_icon="🗓️",
+    layout="wide",
+)
 
-# --- Utilitaires Prochaine séance (Algérie / parsing) ---
-import datetime as _dt
-import pytz as _pytz
+# Moins de squiggles Streamlit
+st.markdown(
+    """
+    <style>
+      .stDownloadButton > button { width: 100%; }
+      .compact-badge { 
+        display:inline-block; padding:4px 10px; border-radius:999px; 
+        background:#e2e8f0; color:#111; font-weight:600; 
+        border:1px solid rgba(0,0,0,.05);
+      }
+      .chip-dark { background:#0ea5e9; color:white; }
+      .chip-green { background:#16a34a; color:white; }
+      .chip-purple{ background:#7c3aed; color:white; }
+      .chip-blue  { background:#4F7BFE; color:white; }
+      .chip-orange{ background:#fb923c; color:white; }
+      .muted { color:rgba(0,0,0,.55); }
+      .muted-dark { color:rgba(255,255,255,.7); }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
-TZ_DZ = _pytz.timezone("Africa/Algiers")
-# mapping Python weekday() -> libellé FR utilisé dans tes tableaux
+# ---------- Répertoires de données ----------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+EDT_DIR = os.path.join(BASE_DIR, "data", "raw", "edt")
+STUD_DIR = os.path.join(BASE_DIR, "data", "raw", "students")
+
+# ---------- Timezone DZ & jours ----------
+TZ_DZ = pytz.timezone("Africa/Algiers")
 WEEKDAY_FR = ["LUNDI", "MARDI", "MERCREDI", "JEUDI", "VENDREDI", "SAMEDI", "DIMANCHE"]
 
-def now_dz():
-    """datetime 'aware' en Afrique/Alger."""
-    return _dt.datetime.now(TZ_DZ)
+def now_dz() -> dt.datetime:
+    return dt.datetime.now(TZ_DZ)
 
-def parse_hhmm(s: str) -> _dt.time:
-    """
-    '08h30' -> datetime.time(8,30)
-    Accepte aussi '08:30' par sécurité.
-    """
+def pick_today_label() -> str:
+    return WEEKDAY_FR[now_dz().weekday()]
+
+def parse_hhmm(s: str) -> dt.time:
     if not isinstance(s, str):
         s = str(s or "")
     s = s.strip().lower().replace(" ", "")
     s = s.replace("h", ":")
     if ":" not in s:
-        # ex: '8' -> '8:00'
         s = f"{s}:00"
     hh, mm = s.split(":", 1)
-    return _dt.time(int(hh), int(mm or 0))
+    return dt.time(int(hh), int(mm or 0))
 
-def enrich_times(df):
-    """Ajoute colonnes _tstart/_tend (time) et tri par Heure début."""
+def td_to_hm(delta: dt.timedelta) -> str:
+    secs = max(0, int(delta.total_seconds()))
+    h, r = divmod(secs, 3600)
+    m, _ = divmod(r, 60)
+    return f"{m} min" if h == 0 else f"{h}h{m:02d}"
+
+def fmt_hhmm(t: dt.time) -> str:
+    return f"{t.hour:02d}h{t.minute:02d}"
+
+def enrich_times(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df.copy()
     out = df.copy()
     out["_tstart"] = out["Heure début"].apply(parse_hhmm)
     out["_tend"]   = out["Heure fin"].apply(parse_hhmm)
-    out = out.sort_values(by=["_tstart", "_tend"]).reset_index(drop=True)
+    return out.sort_values(by=["_tstart", "_tend"]).reset_index(drop=True)
+# streamlit_app.py  — PART 2/6
+
+# ---------- Normalisation des clés (depuis nom fichiers & colonnes) ----------
+SPEC_ALIASES = {
+    "GC": "GENIE CIVIL",
+    "GENIECIVIL": "GENIE CIVIL",
+    "RIB": "RIB",
+    "VOA": "VOA",
+    "STR": "STRUCTURE",
+    "STRUCTURE": "STRUCTURE",
+    "LICENCE": "LICENCE",
+    "LICENCE2": "LICENCE",
+    "LICENCE3": "LICENCE",
+    "INGENIEUR": "INGENIEUR",
+    "ING": "INGENIEUR",
+    "ING1": "INGENIEUR",
+    "ING2": "INGENIEUR",
+    "ING3": "INGENIEUR",
+}
+
+LEVEL_ALIASES = {
+    "L2": "LICENCE 2",
+    "L3": "LICENCE 3",
+    "LICENCE2": "LICENCE 2",
+    "LICENCE3": "LICENCE 3",
+    "1ING": "INGENIEUR 1",
+    "2ING": "INGENIEUR 2",
+    "3ING": "INGENIEUR 3",
+    "ING1": "INGENIEUR 1",
+    "ING2": "INGENIEUR 2",
+    "ING3": "INGENIEUR 3",
+    "M1": "M1",
+    "M2": "M2",
+}
+
+def norm_spec_from_filename(name: str) -> Optional[str]:
+    s = re.sub(r"[^a-zA-Z0-9]+", " ", name.upper())
+    tokens = s.split()
+    # ordre de priorité : RIB/VOA/STR → ING → LICENCE
+    if "RIB" in tokens: return "RIB"
+    if "VOA" in tokens: return "VOA"
+    if "STR" in tokens or "STRUCTURE" in tokens: return "STRUCTURE"
+    if "ING" in tokens or "INGENIEUR" in tokens: return "INGENIEUR"
+    if "L2" in tokens or "LICENCE2" in tokens: return "LICENCE"
+    if "L3" in tokens or "LICENCE3" in tokens: return "LICENCE"
+    return None
+
+def norm_level_from_filename(name: str) -> Optional[str]:
+    s = re.sub(r"[^a-zA-Z0-9]+", " ", name.upper())
+    if "L2" in s: return "LICENCE 2"
+    if "L3" in s: return "LICENCE 3"
+    if "1ING" in s or "ING1" in s: return "INGENIEUR 1"
+    if "2ING" in s or "ING2" in s: return "INGENIEUR 2"
+    if "3ING" in s or "ING3" in s: return "INGENIEUR 3"
+    if "M1" in s: return "M1"
+    if "M2" in s: return "M2"
+    return None
+
+def norm_group_from_filename(name: str) -> Optional[str]:
+    s = name.upper()
+    m = re.search(r"\bG(1[12])\b", s)
+    if m: return f"G{m.group(1)}"
+    # parfois "G11" collé à autre chose :
+    m = re.search(r"G11", s)
+    if m: return "G11"
+    m = re.search(r"G12", s)
+    if m: return "G12"
+    return None
+
+# ---------- Cache lecture fichiers ----------
+@st.cache_data(show_spinner=False)
+def load_all_edt() -> pd.DataFrame:
+    rows = []
+    for path in sorted(glob.glob(os.path.join(EDT_DIR, "*.xlsx"))):
+        fname = os.path.basename(path)
+        spec  = norm_spec_from_filename(fname) or ""
+        level = norm_level_from_filename(fname) or ""
+        group = norm_group_from_filename(fname) or ""
+
+        try:
+            df = pd.read_excel(path)
+        except Exception:
+            continue
+
+        # On attend colonnes : Jour, Heure début, Heure fin, Matière, Type, Enseignant, Salle, Fréquence (optionnel)
+        colmap = {}
+        for c in df.columns:
+            cu = str(c).strip().lower()
+            if "jour" in cu: colmap[c] = "Jour"
+            elif ("début" in cu or "debut" in cu) and "heure" in cu: colmap[c] = "Heure début"
+            elif ("fin" in cu) and "heure" in cu: colmap[c] = "Heure fin"
+            elif "mati" in cu: colmap[c] = "Matière"
+            elif cu in ("type", "nature"): colmap[c] = "Type"
+            elif "enseign" in cu or "prof" in cu: colmap[c] = "Enseignant"
+            elif "salle" in cu or "local" in cu: colmap[c] = "Salle"
+            elif "fréq" in cu or "freq" in cu: colmap[c] = "Fréquence"
+
+        df = df.rename(columns=colmap)
+        must = ["Jour", "Heure début", "Heure fin", "Matière", "Type", "Enseignant", "Salle"]
+        if not all(m in df.columns for m in must):
+            continue
+
+        df["Spécialité"] = spec or ""
+        df["Niveau"] = level or ""
+        df["Groupe"] = group or ""
+
+        df["Jour"] = df["Jour"].astype(str).str.strip().str.upper()
+        rows.append(df[must + ["Spécialité","Niveau","Groupe"] + ([ "Fréquence"] if "Fréquence" in df.columns else [])])
+
+    if not rows:
+        return pd.DataFrame(columns=["Jour","Heure début","Heure fin","Matière","Type","Enseignant","Salle","Spécialité","Niveau","Groupe"])
+    out = pd.concat(rows, ignore_index=True)
     return out
 
-def pick_today_label():
-    """Libellé de jour FR (ex: 'MERCREDI') basé sur l’heure algérienne."""
-    return WEEKDAY_FR[now_dz().weekday()]
-
-def pick_current_and_next(sessions_for_day):
+@st.cache_data(show_spinner=False)
+def load_all_students() -> Dict[Tuple[str,str,str], pd.DataFrame]:
     """
-    sessions_for_day: DataFrame déjà enrichi (colonnes _tstart/_tend).
-    Retourne (current_row | None, next_row | None, state_str)
-      - state_str ∈ {'ongoing','upcoming','empty','completed'}
+    Retourne un dict { (spec,level,group): dataframe_etudiants }
+    Colonnes attendues : Nom, Prénom (ou Nom & Prénom dans 1 colonne), possibilité Matricule (ignoré pour feuille mobile)
     """
-    if sessions_for_day.empty:
-        return None, None, "empty"
+    out: Dict[Tuple[str,str,str], pd.DataFrame] = {}
+    for path in sorted(glob.glob(os.path.join(STUD_DIR, "*.xlsx"))):
+        fname = os.path.basename(path)
+        spec  = norm_spec_from_filename(fname) or "GENIE CIVIL"
+        level = norm_level_from_filename(fname) or ""
+        group = norm_group_from_filename(fname) or ""
 
-    tnow = now_dz().time()
-    # séance en cours ?
-    ongoing = sessions_for_day[
-        (sessions_for_day["_tstart"] <= tnow) &
-        (tnow < sessions_for_day["_tend"])
-    ]
-    if not ongoing.empty:
-        cur = ongoing.iloc[0]
-        # la prochaine après celle en cours
-        nexts = sessions_for_day[sessions_for_day["_tstart"] > cur["_tend"]]
-        nxt = nexts.iloc[0] if not nexts.empty else None
-        return cur, nxt, "ongoing"
+        try:
+            df = pd.read_excel(path)
+        except Exception:
+            continue
 
-    # pas de séance en cours: cherche la prochaine
-    nxts = sessions_for_day[sessions_for_day["_tstart"] > tnow]
-    if not nxts.empty:
-        nxt = nxts.iloc[0]
-        return None, nxt, "upcoming"
+        # normaliser colonnes
+        colmap = {}
+        for c in df.columns:
+            cu = str(c).strip().lower()
+            if "nom" in cu and "prénom" in cu:  # combine
+                colmap[c] = "NomComplet"
+            elif cu.startswith("nom") and "prénom" not in cu:
+                colmap[c] = "Nom"
+            elif "prénom" in cu or "prenom" in cu:
+                colmap[c] = "Prénom"
+            elif "matricule" in cu or "id" == cu:
+                colmap[c] = "Matricule"
+        df = df.rename(columns=colmap)
 
-    # toutes les séances du jour sont passées
-    return None, None, "completed"
+        if "NomComplet" in df.columns:
+            # scinder si possible, sinon on garde tel quel
+            parts = df["NomComplet"].astype(str).str.strip()
+            df["Nom affiché"] = parts
+        else:
+            df["Nom affiché"] = (df.get("Nom","").astype(str).str.strip() + " " +
+                                 df.get("Prénom","").astype(str).str.strip()).str.strip()
 
-def fmt_hhmm(t: _dt.time) -> str:
-    return f"{t.hour:02d}h{t.minute:02d}"
+        df = df[["Nom affiché"]].copy()
+        df["Nom affiché"] = df["Nom affiché"].replace("nan nan","").str.strip()
+        df = df[df["Nom affiché"]!=""].reset_index(drop=True)
 
-def td_to_hm(delta: _dt.timedelta) -> str:
-    # Retour "XhYY" ou "X min" si < 1h
-    secs = int(delta.total_seconds())
-    if secs < 0:
-        secs = 0
-    h, r = divmod(secs, 3600)
-    m, _ = divmod(r, 60)
-    if h == 0:
-        return f"{m} min"
-    return f"{h}h{m:02d}"
+        key = (spec, level, group)
+        out[key] = df
 
+    return out
 
-# --------------------------- CONFIG GLOBALE ----------------------------
+# Charger au démarrage
+EDT_ALL = load_all_edt()
+STUD_ALL = load_all_students()
 
-st.set_page_config(
-    page_title="EDT & Listes • Génie Civil (S1)",
-    page_icon="🗓️",
-    layout="wide",
-)
+# Options de filtres dynamiques
+def options_by_hierarchy():
+    # Spécialités
+    specs = []
+    for s in ["RIB","VOA","STRUCTURE","LICENCE","INGENIEUR"]:
+        if (EDT_ALL["Spécialité"]==s).any() or any(k[0]==s for k in STUD_ALL.keys()):
+            specs.append(s)
 
-BASE_DIR   = Path(__file__).resolve().parent
-RAW_EDT    = str(BASE_DIR / "data" / "raw" / "edt")
-RAW_STU    = str(BASE_DIR / "data" / "raw" / "students")
-SEMESTRE   = "S1"                 # application mono-semestre
-SHOW_DIAGNOSTIC = False           # <- True pour afficher l’expander diagnostic
+    # Niveaux par spécialité
+    levels_by_spec: Dict[str, list] = {}
+    for sp in specs:
+        levs = set(EDT_ALL.loc[EDT_ALL["Spécialité"]==sp, "Niveau"].unique())
+        levs.update([k[1] for k in STUD_ALL.keys() if k[0]==sp])
+        levs = [x for x in levs if x]
+        order = ["LICENCE 2","LICENCE 3","INGENIEUR 1","INGENIEUR 2","INGENIEUR 3","M1","M2"]
+        levs = [l for l in order if l in levs] + [l for l in sorted(levs) if l not in order]
+        levels_by_spec[sp] = levs
 
-# Jour / ordre
-WEEKDAY_FR = ["LUNDI", "MARDI", "MERCREDI", "JEUDI", "VENDREDI", "SAMEDI", "DIMANCHE"]
-JOURS_FR = WEEKDAY_FR
-ORDER_JOUR = {d: i for i, d in enumerate(WEEKDAY_FR)}
+    # Groupes par (spec, level)
+    groups_by_spec_level: Dict[Tuple[str,str], list] = {}
+    for sp in specs:
+        for lv in levels_by_spec.get(sp, []):
+            gr = set(EDT_ALL.loc[(EDT_ALL["Spécialité"]==sp)&(EDT_ALL["Niveau"]==lv), "Groupe"].unique())
+            gr.update([k[2] for k in STUD_ALL.keys() if k[0]==sp and k[1]==lv])
+            gr = [g for g in gr if g]
+            # normaliser : prioriser G11/G12
+            if "G11" in gr or "G12" in gr:
+                order = ["G11","G12"]
+                gr = [g for g in order if g in gr] + [g for g in sorted(gr) if g not in order]
+            else:
+                gr = sorted(gr)
+            groups_by_spec_level[(sp,lv)] = gr
 
-# Colonnes attendues
-EDT_COLS = [
-    "Niveau", "Spécialité", "Groupe", "Semestre", "Jour", "Heure début", "Heure fin",
-    "Durée (h)", "Matière", "Type", "Enseignant", "Salle", "Fréquence",
-]
-STU_COLS = [
-    "Annee", "Semestre", "Spécialité", "Niveau", "Groupe",
-    "Matricule", "Nom", "Prenom", "Email", "Téléphone", "Remarque", "N°",
-]
+    return specs, levels_by_spec, groups_by_spec_level
+# streamlit_app.py  — PART 3/6
 
-# ------------------------------ STYLES --------------------------------
+def badge(text, color_class="chip-blue"):
+    return f'<span class="compact-badge {color_class}">{text}</span>'
 
-def inject_css() -> None:
-    st.markdown(
-        """
-        <style>
-          /* Commun */
-          h1, h2, h3 { letter-spacing:.2px }
-          .actionbar { display:flex; gap:.5rem; flex-wrap:wrap; margin:.25rem 0 1rem }
-          .pill { padding:.38rem .65rem; border-radius:999px; font-size:.86rem; font-weight:600; border:1px solid transparent; }
-          .badge { padding:.12rem .45rem; border-radius:8px; font-size:.78rem; margin-left:.35rem; border:1px solid transparent; font-weight:600; }
-          .card  { border:1px solid transparent; padding:1rem; border-radius:12px; margin:.25rem 0 .75rem; }
-          .muted{ opacity:.85; font-size:.92rem }
-          .next-title { font-size:1.1rem; font-weight:700; }
+def filter_area():
+    st.sidebar.subheader("🔎 Mode d’accès")
+    mode = st.sidebar.radio("Je suis :", ["Étudiant", "Enseignant"], horizontal=False, index=0)
 
-          /* Sombre */
-          @media (prefers-color-scheme: dark) {
-            .pill { background:#1f2937; color:#e5e7eb; border-color:#374151; }
-            .role-etudiant  { background:#0e3c2e; color:#a7f3d0; border-color:#065f46; }
-            .role-enseignant{ background:#2b2547; color:#c7d2fe; border-color:#4338ca; }
+    specs, levels_by_spec, groups_by_spec_level = options_by_hierarchy()
 
-            .card { background:#0f1624; border-color:#1f2937; }
-            .badge { background:#1f2937; color:#e5e7eb; border-color:#374151; }
+    st.sidebar.markdown("### Filtres hiérarchiques")
+    spec = st.sidebar.selectbox("Spécialité", specs, index=0)
 
-            .next-title { color:#e5e7eb; }
-          }
+    levels = levels_by_spec.get(spec, [])
+    if not levels:
+        st.sidebar.info("Pas de niveau pour cette spécialité.")
+        return mode, spec, None, None
+    level = st.sidebar.selectbox("Niveau", levels, index=0, key="sel_level")
 
-          /* Clair */
-          @media (prefers-color-scheme: light) {
-            .pill { background:#eef2ff; color:#1f2937; border-color:#c7d2fe; }
-            .role-etudiant  { background:#dcfce7; color:#064e3b; border-color:#86efac; }
-            .role-enseignant{ background:#e0e7ff; color:#312e81; border-color:#a5b4fc; }
+    groups = groups_by_spec_level.get((spec, level), [])
+    if not groups:
+        st.sidebar.info("Pas de groupe pour cette combinaison.")
+        return mode, spec, level, None
+    group = st.sidebar.selectbox("Groupe", groups, index=0, key="sel_group")
 
-            .card { background:#f8fafc; border-color:#e5e7eb; }
-            .badge { background:#f1f5f9; color:#111827; border-color:#e5e7eb; }
+    # Champ de recherche nom (étudiant/enseignant) — optionnel
+    st.sidebar.markdown("### Nom/Prénom (étudiant ou enseignant)")
+    search_name = st.sidebar.text_input(" ", placeholder="tape un nom puis Entrée", label_visibility="collapsed")
 
-            .next-title { color:#111827; }
-          }
+    # Mode impression
+    st.sidebar.checkbox("🖨️ Mode impression", value=False, key="print_mode")
 
-          /* Data Editor (présence) */
-          [data-testid="stDataEditorContainer"] { border-radius: 12px; }
-          [data-testid="stDataEditorRow"] { min-height: 40px; }
-          [data-testid="column-Nom complet"] div { white-space: normal !important; }
+    return mode, spec, level, group, search_name
 
-          /* (Optionnel) Classes pour les cartes de séance si tu veux éviter le inline style */
-          .session-card{border:1px solid var(--secondary-background-color); border-radius:10px; overflow:hidden; margin-bottom:8px;}
-          .session-head{padding:.55rem .8rem; font-weight:700; color:#fff;}
-          .session-body{padding:.55rem .8rem;}
-          .session-foot{padding:0 .8rem .7rem .8rem; opacity:.9;}
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+def filtered_edt(spec, level, group) -> pd.DataFrame:
+    df = EDT_ALL.copy()
+    if spec:  df = df[df["Spécialité"]==spec]
+    if level: df = df[df["Niveau"]==level]
+    if group: df = df[df["Groupe"]==group]
+    return df.reset_index(drop=True)
 
-def header_role(role_label: str, subtitle: str) -> None:
-    role_class = "role-etudiant" if role_label == "Étudiant" else "role-enseignant"
-    st.markdown(
-        f"""
-        <div class="actionbar">
-          <span class="pill {role_class}">
-            {"👩‍🎓 Étudiant" if role_label == "Étudiant" else "👨‍🏫 Enseignant"}
-          </span>
-          <span class="pill">{subtitle}</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+def student_list_for(spec, level, group) -> pd.DataFrame:
+    return STUD_ALL.get((spec, level, group), pd.DataFrame(columns=["Nom affiché"]))
+# streamlit_app.py  — PART 4/6
 
-inject_css()
-
-# ----------------------------- HELPERS --------------------------------
-
-def read_any(path: str) -> pd.DataFrame:
-    """Lecture de fichiers .xlsx ou .csv."""
-    if path.lower().endswith(".csv"):
-        return pd.read_csv(path)
-    return pd.read_excel(path)
-
-def df_to_xlsx_bytes(df: pd.DataFrame) -> bytes:
-    """DataFrame → bytes .xlsx (openpyxl)."""
-    buf = BytesIO()
+def export_xlsx_bytes(df: pd.DataFrame, sheet_name="EDT"):
+    buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as xw:
-        df.to_excel(xw, index=False)
-    return buf.getvalue()
+        df.to_excel(xw, index=False, sheet_name=sheet_name)
+    buf.seek(0)
+    return buf
 
-def time_to_minutes(h: Any) -> Optional[int]:
-    """'08h30' → 510. Retourne None si invalide."""
-    s = str(h).strip().lower().replace(" ", "")
-    if "h" not in s and ":" not in s:
-        return None
-    try:
-        s = s.replace("h", ":")
-        hh, mm = s.split(":")
-        return int(hh or 0) * 60 + int(mm or 0)
-    except Exception:
-        return None
+def render_student_ui(spec, level, group, search_name):
+    st.markdown(f"# Portail Génie Civil — EDT & Listes (S1)")
+    st.markdown(
+        badge("Étudiant","chip-green") + " " +
+        badge(f"{spec} {level} • Groupe {group}","chip-blue"),
+        unsafe_allow_html=True
+    )
 
-def minutes_to_dt(d: datetime, minutes: int) -> datetime:
-    return datetime.combine(d.date(), dtime.min) + timedelta(minutes=minutes)
+    df = filtered_edt(spec, level, group)
 
-def human_delta(dt: datetime, now: datetime) -> str:
-    s = int((dt - now).total_seconds())
-    d = s // 86400; s %= 86400
-    h = s // 3600; s %= 3600
-    m = s // 60
-    out = []
-    if d: out.append(f"{d}j")
-    if h: out.append(f"{h}h")
-    if m: out.append(f"{m}m")
-    return " ".join(out) or "0m"
-# --------------------- NORMALISATION & INFERENCE ----------------------
+    tabs = st.tabs(["📘 Mon EDT", "⏭️ Prochaine séance"])
+    # --- Mon EDT ---
+    with tabs[0]:
+        st.subheader("Emploi du temps")
+        if df.empty:
+            st.info("Aucun EDT trouvé pour ces filtres.")
+        else:
+            st.download_button(
+                "📥 Exporter l’EDT en Excel",
+                data=export_xlsx_bytes(df),
+                file_name=f"EDT_{spec}_{level}_{group}_S1.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+            st.dataframe(df, use_container_width=True, height=480)
 
-def ensure_cols(df: pd.DataFrame, cols: Iterable[str], numeric: Iterable[str] = ()) -> pd.DataFrame:
-    numeric = set(numeric or [])
-    for c in cols:
-        if c not in df.columns:
-            df[c] = 0.0 if c in numeric else ""
-    return df[[c for c in cols]]
+    # --- Prochaine séance (Algérie + séance en cours / prochaine / ensuite) ---
+    with tabs[1]:
+        st.subheader("Prochaine séance (Étudiant)")
 
-def normalize_semestre(val: Any, fallback: str = "S1") -> str:
-    v = str(val).strip().upper()
-    return v or fallback
+        if df.empty:
+            st.info("Aucun EDT n'est disponible pour ces filtres.")
+            return
 
-def normalize_groupe(val: Any) -> str:
-    s = str(val).upper().replace(" ", "")
-    if not s:
-        return s
-    if not s.startswith("G") and s.isdigit():
-        return "G" + s
-    return s
+        dfe = enrich_times(df)
+        all_days = WEEKDAY_FR
+        default_day = pick_today_label()
+        day_choice = st.selectbox("Jour", options=all_days, index=all_days.index(default_day))
 
-def classify_spec_level(spec_text: str, level_text: str) -> Tuple[str, str]:
-    S = (spec_text or "").upper()
-    L = (level_text or "").upper()
-    if "RIB" in S:        return "RIB",        "M1" if "M1" in S+L else ("M2" if "M2" in S+L else "")
-    if "VOA" in S:        return "VOA",        "M1" if "M1" in S+L else ("M2" if "M2" in S+L else "")
-    if "STRUCT" in S:     return "STRUCTURE",  "M1" if "M1" in S+L else ("M2" if "M2" in S+L else "")
-    if "L2" in S+L:       return "LICENCE", "2"
-    if "L3" in S+L:       return "LICENCE", "3"
-    if any(k in S+L for k in ["ING", "INGÉ", "INGENIEUR", "INGÉNIEUR"]):
-        if "1" in S+L: return "INGENIEUR", "1"
-        if "2" in S+L: return "INGENIEUR", "2"
-        if "3" in S+L: return "INGENIEUR", "3"
-        return "INGENIEUR", ""
-    return "", ""
+        day_df = dfe[dfe["Jour"].str.upper()==day_choice].copy()
+        def pick_current_and_next(sessions_for_day):
+            if sessions_for_day.empty:
+                return None, None, "empty"
+            tnow = now_dz().time()
+            ongoing = sessions_for_day[
+                (sessions_for_day["_tstart"] <= tnow) &
+                (tnow < sessions_for_day["_tend"])
+            ]
+            if not ongoing.empty:
+                cur = ongoing.iloc[0]
+                nexts = sessions_for_day[sessions_for_day["_tstart"] > cur["_tend"]]
+                nxt = nexts.iloc[0] if not nexts.empty else None
+                return cur, nxt, "ongoing"
+            nxts = sessions_for_day[sessions_for_day["_tstart"] > tnow]
+            if not nxts.empty:
+                nxt = nxts.iloc[0]
+                return None, nxt, "upcoming"
+            return None, None, "completed"
 
-# ----------------- INFÉRENCE MÉTA DEPUIS LE NOM DU FICHIER ------------
+        def block_session(row, color="#4F7BFE"):
+            mat = str(row["Matière"])
+            typ = str(row.get("Type","") or "")
+            teach = str(row.get("Enseignant","") or "")
+            salle = str(row.get("Salle","") or "")
+            t1, t2 = row["_tstart"], row["_tend"]
+            st.markdown(
+                f"""
+                <div style="background:{color};color:white;border-radius:10px;padding:10px 14px;margin-top:8px;">
+                  <strong>{mat} ({typ})</strong><br/>
+                  👨‍🏫 {teach} &nbsp; • &nbsp; 🏫 Salle {salle} &nbsp; • &nbsp; 📅 {day_choice}<br/>
+                  🕒 {fmt_hhmm(t1)} – {fmt_hhmm(t2)}
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
 
-def infer_from_filename(path: str) -> Tuple[Optional[str], Optional[str], Optional[str], str]:
-    name = Path(path).stem.upper()
-    name_compact = re.sub(r"[\s\-]+", "_", name)
-    name_nospace = re.sub(r"\s+", "", name)
+        cur, nxt, state = pick_current_and_next(day_df)
+        st.caption("Prochaine séance")
 
-    # Groupe
-    g = None
-    m = re.search(r"(?:^|[_\-])G\s*?(\d+)", name, flags=re.I)
-    if not m:
-        m = re.search(r"G\s*?(\d+)", name, flags=re.I)
-    if m:
-        g = f"G{m.group(1)}"
+        now_local = now_dz()
+        if state == "empty":
+            st.warning(f"Aucune séance planifiée pour {day_choice}.")
+        elif state == "ongoing":
+            block_session(cur, color="#16a34a")
+            end_dt = now_local.replace(hour=cur["_tend"].hour, minute=cur["_tend"].minute, second=0, microsecond=0)
+            st.markdown(f"⏱ **En cours** — reste **{td_to_hm(end_dt-now_local)}** (de {fmt_hhmm(cur['_tstart'])} à {fmt_hhmm(cur['_tend'])}).")
+            st.markdown("**Après :**")
+            if nxt is not None:
+                block_session(nxt, color="#4F7BFE")
+                start_dt = now_local.replace(hour=nxt["_tstart"].hour, minute=nxt["_tstart"].minute, second=0, microsecond=0)
+                st.caption(f"🗓 Dans **{td_to_hm(start_dt - now_local)}** (début {fmt_hhmm(nxt['_tstart'])}).")
+            else:
+                st.info("Aucune autre séance après celle en cours.")
+        elif state == "upcoming":
+            block_session(nxt, color="#4F7BFE")
+            start_dt = now_local.replace(hour=nxt["_tstart"].hour, minute=nxt["_tstart"].minute, second=0, microsecond=0)
+            st.caption(f"🗓 Dans **{td_to_hm(start_dt - now_local)}** (de {fmt_hhmm(nxt['_tstart'])} à {fmt_hhmm(nxt['_tend'])}).")
+            rest = day_df[day_df["_tstart"] > nxt["_tstart"]]
+            if not rest.empty:
+                st.markdown("**Après :**")
+                nxt2 = rest.iloc[0]
+                block_session(nxt2, color="#7c3aed")
+        else:
+            st.info(f"Toutes les séances de **{day_choice}** sont terminées.")
+# streamlit_app.py  — PART 5/6
 
-    # Semestre
-    sem = None
-    m = re.search(r"(?:^|[_\-])S\s*?(\d+)", name, flags=re.I)
-    if not m:
-        m = re.search(r"S\s*?(\d+)", name, flags=re.I)
-    if m:
-        sem = f"S{m.group(1)}"
+def teachers_next_today(df_day: pd.DataFrame) -> pd.DataFrame:
+    """Retourne par enseignant la prochaine séance aujourd'hui (après maintenant) + salle."""
+    if df_day.empty:
+        return pd.DataFrame(columns=["Enseignant","Heure début","Heure fin","Matière","Type","Salle"])
+    dfe = enrich_times(df_day)
+    tnow = now_dz().time()
+    # pour chaque enseignant, choisir la première séance dont _tstart > tnow, sinon la dernière en cours
+    rows = []
+    for teach, grp in dfe.groupby("Enseignant"):
+        nxts = grp[grp["_tstart"] > tnow]
+        if not nxts.empty:
+            r = nxts.iloc[0]
+            rows.append(r[["Enseignant","Heure début","Heure fin","Matière","Type","Salle"]])
+        else:
+            ongoing = grp[(grp["_tstart"] <= tnow) & (tnow < grp["_tend"])]
+            if not ongoing.empty:
+                r = ongoing.iloc[0]
+                rows.append(r[["Enseignant","Heure début","Heure fin","Matière","Type","Salle"]])
+    if not rows:
+        return pd.DataFrame(columns=["Enseignant","Heure début","Heure fin","Matière","Type","Salle"])
+    out = pd.DataFrame(rows).sort_values(by=["Enseignant","Heure début"]).reset_index(drop=True)
+    return out
 
-    # Spécialités M1/M2
-    if "RIB" in name_nospace:
-        niv = "M2" if "M2" in name_nospace else ("M1" if "M1" in name_nospace else "")
-        return "RIB", niv, g, (sem or "S1")
-    if "VOA" in name_nospace:
-        niv = "M2" if "M2" in name_nospace else ("M1" if "M1" in name_nospace else "")
-        return "VOA", niv, g, (sem or "S1")
-    if "STRUCT" in name_nospace or "STRUC" in name_nospace:
-        niv = "M2" if "M2" in name_nospace else ("M1" if "M1" in name_nospace else "")
-        return "STRUCTURE", niv, g, (sem or "S1")
+def render_teacher_ui(spec, level, group, search_name):
+    st.markdown(f"# Portail Génie Civil — EDT & Listes (S1)")
+    st.markdown(
+        badge("Enseignant","chip-purple") + " " +
+        badge(f"{spec} {level} • Groupe {group}","chip-blue"),
+        unsafe_allow_html=True
+    )
 
-    # LICENCE 2/3
-    m = re.search(r"(?:LICENCE|L)[_\- ]?([23])", name_compact)
-    if m:
-        return "LICENCE", m.group(1), g, (sem or "S1")
+    df = filtered_edt(spec, level, group)
 
-    # INGENIEUR 1/2/3
-    m = re.search(r"(?:INGENIEUR|ING)[_\- ]?([123])", name_compact)
-    if not m:
-        m = re.search(r"([123])[_\- ]?(?:INGENIEUR|ING)", name_compact)
-    if m:
-        return "INGENIEUR", m.group(1), g, (sem or "S1")
+    tabs = st.tabs(["🗂️ Planning", "🧭 Où trouver un enseignant ?", "📝 Feuille de présence"])
+    # --- Planning ---
+    with tabs[0]:
+        st.subheader("Planning — Aperçu")
+        if df.empty:
+            st.info("Aucun EDT pour ces filtres.")
+        else:
+            st.download_button(
+                "📥 Exporter le planning en Excel",
+                data=export_xlsx_bytes(df, "Planning"),
+                file_name=f"Planning_{spec}_{level}_{group}_S1.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+            st.dataframe(df, use_container_width=True, height=480)
 
-    return None, None, g, (sem or "S1")
+    # --- Où trouver un enseignant ? ---
+    with tabs[1]:
+        st.subheader("Où trouver un enseignant aujourd’hui ?")
+        dftoday = df[df["Jour"].str.upper()==pick_today_label()].copy()
+        # filtre salle optionnel
+        all_salles = sorted(x for x in dftoday["Salle"].astype(str).unique() if x)
+        col1, col2 = st.columns([1,1])
+        with col1:
+            room = st.selectbox("Filtrer par salle (optionnel)", options=["(toutes)"]+all_salles, index=0)
+        if room != "(toutes)":
+            dftoday = dftoday[dftoday["Salle"].astype(str)==room]
+        res = teachers_next_today(dftoday)
+        if search_name:
+            s = search_name.strip().lower()
+            res = res[res["Enseignant"].astype(str).str.lower().str.contains(s)]
+        if res.empty:
+            st.info("Aucun cours planifié pour aujourd’hui selon ce filtre.")
+        else:
+            st.dataframe(res, use_container_width=True, height=480)
 
-# ------------------ HARMONISATION LISTES ÉTUDIANTS --------------------
+    # --- Feuille de présence (enseignant) ---
+    with tabs[2]:
+        st.subheader("Feuille de présence (enseignant)")
+        stud = student_list_for(spec, level, group)
+        if stud.empty:
+            st.warning("Aucune liste d’étudiants pour ces filtres.")
+            return
 
-def harmonize_student_columns(df: pd.DataFrame) -> pd.DataFrame:
-    mapping: Dict[str, str] = {}
-    for c in df.columns:
-        k = str(c).strip().lower()
-        if k in {"n°", "nº", "n", "num", "numero", "numéro", "n°/ordre"}:
-            mapping[c] = "N°"
-        elif k in {"matricule", "code", "id", "cne", "apogee", "apogée"}:
-            mapping[c] = "Matricule"
-        elif k == "nom":
-            mapping[c] = "Nom"
-        elif k in {"prenom", "prénom"}:
-            mapping[c] = "Prenom"
-        elif k in {"nom et prénom", "nom et prenom", "nom_prenom", "nom-prenom"}:
-            mapping[c] = "NomPrenom"
-        elif k.startswith("remarq") or k.startswith("obs"):
-            mapping[c] = "Remarque"
-        elif k.startswith("semestre"):
-            mapping[c] = "Semestre"
-        elif k.startswith("groupe"):
-            mapping[c] = "Groupe"
-        elif k.startswith("spécial") or k.startswith("special"):
-            mapping[c] = "Spécialité"
-        elif k in {"annee","année","annee scolaire","année scolaire"}:
-            mapping[c] = "Annee"
+        # Barre outils
+        c1, c2, c3 = st.columns([1,2,2])
+        with c1:
+            mobile = st.toggle("📱 Mode mobile (affichage compact)", value=True, help="Nom + case Présent seulement, + Remarque")
+        with c2:
+            q = st.text_input("🔎 Recherche rapide (Nom/Prénom) :", "")
+        # State présence
+        key_state = f"presence::{spec}::{level}::{group}"
+        key_remark = f"remarks::{spec}::{level}::{group}"
+        if key_state not in st.session_state:
+            st.session_state[key_state] = {name: False for name in stud["Nom affiché"].tolist()}
+        if key_remark not in st.session_state:
+            st.session_state[key_remark] = {name: "" for name in stud["Nom affiché"].tolist()}
 
-    if mapping:
-        df = df.rename(columns=mapping)
+        # Actions
+        colA, colB = st.columns([1,1])
+        with colA:
+            if st.button("✅ Tout cocher", use_container_width=True):
+                for n in st.session_state[key_state]:
+                    st.session_state[key_state][n] = True
+        with colB:
+            if st.button("❌ Tout décocher", use_container_width=True):
+                for n in st.session_state[key_state]:
+                    st.session_state[key_state][n] = False
 
-    if "NomPrenom" in df.columns and (("Nom" not in df.columns) or ("Prenom" not in df.columns)):
-        np = df["NomPrenom"].astype(str).str.strip()
-        if "Nom" not in df.columns:
-            df["Nom"] = np.str.split(r"\s+", n=1, expand=True)[0].fillna("")
-        if "Prenom" not in df.columns:
-            part = np.str.split(r"\s+", n=1, expand=True)
-            df["Prenom"] = (part[1] if part.shape[1] > 1 else "").fillna("")
+        # Filtrage recherche
+        s = q.strip().lower()
+        view = stud.copy()
+        if s:
+            view = view[view["Nom affiché"].str.lower().str.contains(s)]
 
-    for col in ["N°", "Matricule", "Nom", "Prenom", "Remarque", "Semestre", "Spécialité", "Niveau", "Groupe"]:
-        if col in df.columns:
-            df[col] = df[col].astype(str).str.strip()
-    return df
+        # Rendu compact mobile
+        if mobile:
+            # Liste simple : Nom + case + remarque (une ligne par étudiant)
+            data = view["Nom affiché"].tolist()
+            for name in data:
+                cc1, cc2 = st.columns([3,1])
+                with cc1:
+                    st.write(name)
+                with cc2:
+                    st.checkbox("Présent", key=f"chk::{key_state}::{name}", value=st.session_state[key_state].get(name,False),
+                                on_change=lambda n=name: st.session_state[key_state].__setitem__(n, not st.session_state[key_state].get(n,False)))
+                # remarque
+                st.text_input("Remarque", key=f"rk::{key_remark}::{name}",
+                              value=st.session_state[key_remark].get(name,""),
+                              on_change=lambda n=name: st.session_state[key_remark].__setitem__(n, st.session_state.get(f"rk::{key_remark}::{n}", "")),
+                              label_visibility="collapsed",
+                              placeholder="Remarque (facultatif)")
+                st.divider()
+        else:
+            # Tableau standard
+            show = []
+            for _, r in view.iterrows():
+                name = r["Nom affiché"]
+                pres = st.session_state[key_state].get(name,False)
+                remk = st.session_state[key_remark].get(name,"")
+                show.append({"Étudiant": name, "Présent": pres, "Remarque": remk})
+            st.dataframe(pd.DataFrame(show), use_container_width=True, height=480)
 
-# ------------------ CHARGEMENT ET MISE EN FORME (PATCHÉ) --------------
+        # Export PDF
+        def build_presence_pdf() -> bytes:
+            buffer = io.BytesIO()
+            c = canvas.Canvas(buffer, pagesize=A4)
+            W, H = A4
+            margin = 2*cm
+            x, y = margin, H - margin
 
-@st.cache_data
-def load_raw_s1() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    idx_rows = []
-
-    # ----------------------------- EDT ---------------------------------
-    edt_frames = []
-    for f in sorted(glob.glob(f"{RAW_EDT}/*.*")):
-        fname = Path(f).name
-        name_up = fname.upper()
-
-        try:
-            df = read_any(f)
-        except Exception as e:
-            idx_rows.append({"Type":"EDT","Fichier":fname,"Lu":False,"Erreur":str(e),
-                             "S1_par_nom":"S1" in name_up,"S1_par_col":None,
-                             "Spec2":None,"Niv2":None,"Groupe":None})
-            continue
-
-        df = ensure_cols(df, EDT_COLS, numeric=["Durée (h)"])
-        df["Semestre"] = df["Semestre"].apply(normalize_semestre)
-        df["Groupe"]   = df["Groupe"].apply(normalize_groupe)
-
-        has_s1_col = df["Semestre"].astype(str).str.upper().eq("S1").any()
-        s1_by_name = "S1" in name_up
-        if not (s1_by_name or has_s1_col):
-            idx_rows.append({"Type":"EDT","Fichier":fname,"Lu":True,"Erreur":"",
-                             "S1_par_nom":s1_by_name,"S1_par_col":has_s1_col,
-                             "Spec2":None,"Niv2":None,"Groupe":None})
-            continue
-
-        specs, nivs = zip(*df.apply(lambda r: classify_spec_level(r.get("Spécialité",""),
-                                                                  r.get("Niveau","")), axis=1))
-        df["Spec2"], df["Niv2"] = specs, nivs
-
-        # --- INFÉRENCE + FORÇAGE GLOBAL
-        s2_f, n2_f, g_f, sem_f = infer_from_filename(f)
-        df["Spec2"]    = df["Spec2"].fillna("").astype(str).str.upper()
-        df["Niv2"]     = df["Niv2"].fillna("").astype(str).str.upper()
-        df["Groupe"]   = df["Groupe"].fillna("").astype(str)
-        df["Semestre"] = df["Semestre"].fillna("").astype(str).str.upper()
-        if s2_f:  df["Spec2"]    = s2_f
-        if n2_f:  df["Niv2"]     = n2_f
-        if g_f:   df["Groupe"]   = normalize_groupe(g_f)
-        if sem_f: df["Semestre"] = sem_f
-
-        idx_rows.append({
-            "Type":"EDT","Fichier":fname,"Lu":True,"Erreur":"",
-            "S1_par_nom":s1_by_name,"S1_par_col":has_s1_col,
-            "Spec2":df["Spec2"].dropna().astype(str).str.upper().replace("",None).mode().tolist()[:1] or [None],
-            "Niv2": df["Niv2"].dropna().astype(str).str.upper().replace("",None).mode().tolist()[:1] or [None],
-            "Groupe":df["Groupe"].dropna().map(normalize_groupe).mode().tolist()[:1] or [None],
-        })
-
-        df = df[df["Semestre"].astype(str).str.upper() == "S1"].copy()
-        edt_frames.append(df)
-
-    if edt_frames:
-        edt = pd.concat(edt_frames, ignore_index=True)
-        edt["__o"] = edt["Jour"].map(ORDER_JOUR).fillna(99)
-        edt = edt.sort_values(["Spec2","Niv2","Groupe","__o","Heure début"]).drop(columns="__o")
-    else:
-        edt = pd.DataFrame(columns=EDT_COLS + ["Spec2","Niv2"])
-
-    # --------------------------- ETUDIANTS -------------------------------
-    stu_frames = []
-    for f in sorted(glob.glob(f"{RAW_STU}/*.*")):
-        fname = Path(f).name
-        name_up = fname.upper()
-
-        try:
-            df = read_any(f)
-        except Exception as e:
-            idx_rows.append({"Type":"ETU","Fichier":fname,"Lu":False,"Erreur":str(e),
-                             "S1_par_nom":"S1" in name_up,"S1_par_col":None,
-                             "Spec2":None,"Niv2":None,"Groupe":None})
-            continue
-
-        df = harmonize_student_columns(df)
-        df = ensure_cols(df, STU_COLS)
-        df["Semestre"] = df["Semestre"].apply(normalize_semestre)
-        df["Groupe"]   = df["Groupe"].apply(normalize_groupe)
-
-        has_s1_col = df["Semestre"].astype(str).str.upper().eq("S1").any()
-        s1_by_name = "S1" in name_up
-        if not (s1_by_name or has_s1_col):
-            idx_rows.append({"Type":"ETU","Fichier":fname,"Lu":True,"Erreur":"",
-                             "S1_par_nom":s1_by_name,"S1_par_col":has_s1_col,
-                             "Spec2":None,"Niv2":None,"Groupe":None})
-            continue
-
-        specs, nivs = zip(*df.apply(lambda r: classify_spec_level(r.get("Spécialité",""),
-                                                                  r.get("Niveau","")), axis=1))
-        df["Spec2"], df["Niv2"] = specs, nivs
-
-        # --- INFÉRENCE + FORÇAGE GLOBAL
-        s2_f, n2_f, g_f, sem_f = infer_from_filename(f)
-        df["Spec2"]    = df["Spec2"].fillna("").astype(str).str.upper()
-        df["Niv2"]     = df["Niv2"].fillna("").astype(str).str.upper()
-        df["Groupe"]   = df["Groupe"].fillna("").astype(str)
-        df["Semestre"] = df["Semestre"].fillna("").astype(str).str.upper()
-        if s2_f:  df["Spec2"]    = s2_f
-        if n2_f:  df["Niv2"]     = n2_f
-        if g_f:   df["Groupe"]   = normalize_groupe(g_f)
-        if sem_f: df["Semestre"] = sem_f
-
-        idx_rows.append({
-            "Type":"ETU","Fichier":fname,"Lu":True,"Erreur":"",
-            "S1_par_nom":s1_by_name,"S1_par_col":has_s1_col,
-            "Spec2":df["Spec2"].dropna().astype(str).str.upper().replace("",None).mode().tolist()[:1] or [None],
-            "Niv2": df["Niv2"].dropna().astype(str).str.upper().replace("",None).mode().tolist()[:1] or [None],
-            "Groupe":df["Groupe"].dropna().map(normalize_groupe).mode().tolist()[:1] or [None],
-        })
-
-        df = df[df["Semestre"].astype(str).str.upper() == "S1"].copy()
-        stu_frames.append(df)
-
-    etu = pd.concat(stu_frames, ignore_index=True) if stu_frames else pd.DataFrame(columns=STU_COLS + ["Spec2","Niv2"])
-
-    # --------------------- TABLE D’INDEX (affichage) -------------------
-    idx = pd.DataFrame(idx_rows)
-    for c in ["Spec2","Niv2","Groupe"]:
-        if c in idx.columns:
-            idx[c] = idx[c].apply(lambda v: v[0] if isinstance(v, list) and v else v)
-
-    return edt, etu, idx
-
-
-def subgroup_by_spec_level(df: pd.DataFrame, spec: Optional[str]=None,
-                           niv: Optional[str]=None, groupe: Optional[str]=None) -> pd.DataFrame:
-    keep = df[df["Semestre"].astype(str).str.upper() == SEMESTRE]
-    if spec:
-        keep = keep[keep["Spec2"] == spec]
-    if niv:
-        keep = keep[keep["Niv2"] == niv]
-    if groupe:
-        gnorm = normalize_groupe(groupe)
-        keep = keep[keep["Groupe"].apply(normalize_groupe) == gnorm]
-    return keep
-
-
-def level_options_for(spec: str) -> Iterable[str]:
-    if spec in ("RIB","VOA","STRUCTURE"): return ["M1","M2"]
-    if spec == "LICENCE": return ["2","3"]
-    if spec == "INGENIEUR": return ["1","2","3"]
-    return []
-
-def pretty_level_label(spec: str, niv: str) -> str:
-    if spec == "LICENCE": return f"LICENCE {niv}"
-    if spec == "INGENIEUR": return f"INGENIEUR {niv}"
-    return niv
-
-# -------------------------- PDF DE PRÉSENCE ---------------------------
-
-def make_presence_pdf(
-    df: pd.DataFrame,
-    titre: str,
-    meta: str,
-    header: Optional[dict] = None,
-) -> bytes:
-    """
-    Génère un PDF A4 :
-    - entête institutionnelle (Université / Faculté / Département / Spécialité + Groupe)
-    - titre + méta (date/heure)
-    - tableau : N°, Nom complet, Présent, Remarque
-    """
-    buf = BytesIO()
-    c = canvas.Canvas(buf, pagesize=A4)
-    width, height = A4
-    margin = 1.2 * cm
-    y = height - margin
-
-    # -------- Entête institutionnelle (centrée) --------
-    if header is None:
-        header = {}
-    univ = header.get("univ", "UNIVERSITÉ DE TLEMCEN").upper()
-    fac  = header.get("fac",  "FACULTÉ DE TECHNOLOGIE").upper()
-    dept = header.get("dept", "DÉPARTEMENT DE GÉNIE CIVIL").upper()
-    spec_line = header.get("spec", "").strip()
-    grp_line  = header.get("grp", "").strip()
-
-    c.setFont("Helvetica-Bold", 12)
-    c.drawCentredString(width/2, y, univ); y -= 14
-    c.setFont("Helvetica-Bold", 11)
-    c.drawCentredString(width/2, y, fac);  y -= 13
-    c.drawCentredString(width/2, y, dept); y -= 15
-
-    if spec_line or grp_line:
-        c.setFont("Helvetica", 10)
-        if spec_line:
-            c.drawCentredString(width/2, y, spec_line); y -= 12
-        if grp_line:
-            c.drawCentredString(width/2, y, grp_line);  y -= 12
-
-    c.setStrokeColor(colors.grey)
-    c.line(margin, y, width - margin, y)
-    y -= 10
-    c.setStrokeColor(colors.black)
-
-    # -------- Titre + méta (gauche) --------
-    c.setFont("Helvetica-Bold", 13)
-    c.drawString(margin, y, titre)
-    y -= 16
-    c.setFont("Helvetica", 10)
-    c.setFillColor(colors.black)
-    c.drawString(margin, y, meta)
-    y -= 18
-
-    # Dimensions colonnes : N° | Nom complet | Présent | Remarque
-    w_num = 1.0 * cm
-    w_pres = 2.0 * cm
-    w_nom = width - 2 * margin - w_num - w_pres - 6.2 * cm
-    if w_nom < 6.0 * cm:
-        w_nom = 6.0 * cm
-    w_rem = width - 2 * margin - w_num - w_pres - w_nom
-
-    row_h = 13
-
-    def new_page_header(page_idx: int):
-        nonlocal y
-        if y < margin + 4 * row_h:
-            c.showPage()
-            y = height - margin
-            c.setFont("Helvetica-Bold", 13)
-            c.drawString(margin, y, f"{titre}  (p.{page_idx})")
+            # En-tête
+            c.setFont("Helvetica-Bold", 12)
+            c.drawString(x, y, "UNIVERSITÉ DE TLEMCEN")
             y -= 16
+            c.setFont("Helvetica-Bold", 11)
+            c.drawString(x, y, "FACULTÉ DE TECHNOLOGIE")
+            y -= 14
+            c.setFont("Helvetica-Bold", 11)
+            c.drawString(x, y, "DÉPARTEMENT DE GÉNIE CIVIL")
+            y -= 18
             c.setFont("Helvetica", 10)
-            c.drawString(margin, y, meta)
+            c.drawString(x, y, f"Spécialité : {spec}    Niveau : {level}    Groupe : {group}")
+            y -= 14
+            dstr = now_dz().strftime("%d/%m/%Y %H:%M")
+            c.drawString(x, y, f"Feuille de présence — Date/Heure : {dstr}")
+            y -= 10
+            c.line(x, y, W - margin, y)
             y -= 18
 
-        c.setFont("Helvetica-Bold", 10)
-        x = margin
-        for header_txt, w in [("N°", w_num), ("Nom complet", w_nom), ("Présent", w_pres), ("Remarque", w_rem)]:
-            c.rect(x, y - row_h, w, row_h, stroke=1, fill=0)
-            c.drawString(x + 3, y - row_h + 3, header_txt)
-            x += w
-        y -= row_h
-        c.setFont("Helvetica", 9)
+            # Entêtes de colonnes
+            c.setFont("Helvetica-Bold", 10)
+            c.drawString(x, y, "N°")
+            c.drawString(x+20, y, "Nom & Prénom")
+            c.drawString(W - margin - 130, y, "Remarque")
+            c.drawString(W - margin - 30, y, "Présent")
+            y -= 12
+            c.line(x, y, W - margin, y)
+            y -= 10
+
+            # Lignes
+            c.setFont("Helvetica", 10)
+            i = 1
+            for name in stud["Nom affiché"].tolist():
+                pres = st.session_state[key_state].get(name, False)
+                remk = st.session_state[key_remark].get(name, "")
+                if y < margin + 40:
+                    c.showPage()
+                    y = H - margin
+                c.drawString(x, y, str(i))
+                c.drawString(x+20, y, name[:50])
+                c.drawString(W - margin - 130, y, remk[:28])
+                c.drawString(W - margin - 30, y, "✓" if pres else "✗")
+                y -= 14
+                i += 1
+
+            c.showPage()
+            c.save()
+            buffer.seek(0)
+            return buffer.getvalue()
 
-    page_idx = 1
-    new_page_header(page_idx)
-
-    # Corps du tableau
-    for i, r in df.reset_index(drop=True).iterrows():
-        if y < margin + row_h:
-            page_idx += 1
-            new_page_header(page_idx)
-        x = margin
-        vals = [
-            str(i + 1),
-            str(r.get("Nom complet", "")),
-            ("✔" if bool(r.get("Présent", False)) else ""),
-            str(r.get("Remarque", "") or ""),
-        ]
-        for (val, w) in zip(vals, [w_num, w_nom, w_pres, w_rem]):
-            c.rect(x, y - row_h, w, row_h, stroke=1, fill=0)
-            c.drawString(x + 3, y - row_h + 3, val[:120])
-            x += w
-        y -= row_h
-
-    c.showPage()
-    c.save()
-    pdf = buf.getvalue()
-    buf.close()
-    return pdf
-# ====================== UTILS AVANCÉS (Salles/Profs/Horaires) ======================
-
-def tz_now():
-    try:
-        tz = pytz.timezone("Africa/Algiers")
-        return datetime.now(tz)
-    except Exception:
-        return datetime.now()
-
-def french_weekday_name(dt=None):
-    if dt is None: dt = tz_now()
-    return WEEKDAY_FR[dt.weekday()]  # Lundi=0
-
-def _to_dt_today(hour_str, base_date=None):
-    if base_date is None:
-        base_date = tz_now().date()
-    s = str(hour_str).replace("h", ":")
-    hh, mm = s.split(":")
-    hh, mm = int(hh), int(mm)
-    tz = getattr(tz_now(), "tzinfo", None)
-    return datetime.combine(base_date, time(hh, mm, 0, tzinfo=tz))
-
-def _col(df, name_candidates):
-    cols = {c.lower(): c for c in df.columns}
-    for cand in name_candidates:
-        if cand.lower() in cols:
-            return cols[cand.lower()]
-    raise KeyError(f"Colonne manquante parmi {name_candidates} dans {list(df.columns)}")
-
-def get_cols(df):
-    return dict(
-        jour=_col(df, ["Jour"]),
-        hdeb=_col(df, ["Heure début","Début","Heure_debut","Heure Debut"]),
-        hfin=_col(df, ["Heure fin","Fin","Heure_fin","Heure Fin"]),
-        mat=_col(df, ["Matière","Matiere","Module"]),
-        typ=_col(df, ["Type"]),
-        ens=_col(df, ["Enseignant","Prof","Intervenant"]),
-        sal=_col(df, ["Salle"]),
-        freq=_col(df, ["Fréquence","Frequence"]),
-        grp=_col(df, ["Groupe"])
-    )
-
-def current_and_next_for_day(df):
-    if df is None or df.empty:
-        return (None, None, None)
-    C = get_cols(df)
-    today = french_weekday_name()
-    dday = df[df[C["jour"]].astype(str).str.upper().eq(today)].copy()
-    if dday.empty:
-        return (None, None, None)
-    dday["_dt_start"] = dday[C["hdeb"]].astype(str).apply(_to_dt_today)
-    dday["_dt_end"]   = dday[C["hfin"]].astype(str).apply(_to_dt_today)
-    dday.sort_values("_dt_start", inplace=True)
-    now = tz_now()
-    cur = dday[(dday["_dt_start"] <= now) & (now < dday["_dt_end"])].head(1)
-    nxt = dday[dday["_dt_start"] > now].head(1)
-    nxt2 = dday[dday["_dt_start"] > now].iloc[1:2]
-    return (
-        None if cur.empty else cur.iloc[0],
-        None if nxt.empty else nxt.iloc[0],
-        None if nxt2.empty else nxt2.iloc[0],
-    )
-
-def unique_rooms(df):
-    if df is None or df.empty: return []
-    C = get_cols(df)
-    return sorted([s for s in df[C["sal"]].dropna().astype(str).unique() if s.strip()])
-
-def unique_teachers(df_all):
-    if df_all is None or df_all.empty: return []
-    C = get_cols(df_all)
-    return sorted([e for e in df_all[C["ens"]].dropna().astype(str).unique() if e.strip()])
-
-def week_schedule_for_teacher(df_all, teacher):
-    if not teacher or df_all is None or df_all.empty:
-        return None
-    C = get_cols(df_all)
-    sub = df_all[df_all[C["ens"]].astype(str).str.fullmatch(teacher, case=False, na=False)].copy()
-    if sub.empty: return sub
-    day_index = {d:i for i,d in enumerate(WEEKDAY_FR)}
-    sub["_didx"] = sub[C["jour"]].astype(str).str.upper().map(day_index).fillna(7).astype(int)
-    sub["_tstart"] = sub[C["hdeb"]].astype(str).apply(lambda s: int(s.replace("h",":").replace(":","")[:4]))
-    sub.sort_values(["_didx","_tstart"], inplace=True)
-    return sub
-
-# ========== Onglet Prochaine séance ==========
-with tabs_area[1]:  # adapte si ton nom de variable diffère (ex: tab2)
-    st.subheader("Prochaine séance (Étudiant)")
-
-    # On filtre d’abord EDT selon spécialité/niveau/groupe déjà choisis dans ta sidebar
-    edt_filtered = filtered_edt_df  # réutilise ta DataFrame déjà filtrée (spéc→niv→groupe)
-    if edt_filtered is None or edt_filtered.empty:
-        st.info("Aucun EDT n'est disponible pour ces filtres.")
-        st.stop()
-
-    # Ajoute colonnes temps et normalise l’EDT
-    edt_enriched = enrich_times(edt_filtered)
-
-    # Jour par défaut = jour actuel (Algérie)
-    default_day = pick_today_label()
-    all_days = WEEKDAY_FR  # ou edt_enriched['Jour'].str.upper().unique() trié si tu veux limiter aux jours présents
-    day_choice = st.selectbox("Jour", options=all_days, index=all_days.index(default_day))
-
-    # Séances du jour choisi
-    day_df = edt_enriched[edt_enriched["Jour"].str.upper() == day_choice].copy()
-
-    cur, nxt, state = pick_current_and_next(day_df)
-
-    # helpers d’affichage
-    def block_session(row, headline="Séance", color="#4F7BFE"):
-        mat = str(row["Matière"])
-        typ = str(row.get("Type", "") or "").strip()
-        teach = str(row.get("Enseignant", "") or "")
-        salle = str(row.get("Salle", "") or "")
-        t1, t2 = row["_tstart"], row["_tend"]
-
-        st.markdown(
-            f"""
-            <div style="background:{color};color:white;border-radius:10px;padding:10px 14px;margin-top:8px;">
-              <strong>{mat} ({typ})</strong><br/>
-              👨‍🏫 {teach} &nbsp; • &nbsp; 🏫 Salle {salle} &nbsp; • &nbsp; 📅 {day_choice}<br/>
-              🕒 {fmt_hhmm(t1)} – {fmt_hhmm(t2)}
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-
-    # Affichage logique
-    st.caption("Prochaine séance")
-
-    now_local = now_dz()
-    if state == "empty":
-        st.warning(f"Aucune séance planifiée pour {day_choice}.")
-    elif state == "ongoing":
-        # séance en cours
-        block_session(cur, headline="Séance en cours", color="#16a34a")  # vert
-        # temps restant
-        end_dt = now_local.replace(hour=cur["_tend"].hour, minute=cur["_tend"].minute, second=0, microsecond=0)
-        left = end_dt - now_local
-        st.markdown(f"⏱ **En cours** — reste **{td_to_hm(left)}** (de {fmt_hhmm(cur['_tstart'])} à {fmt_hhmm(cur['_tend'])}).")
-
-        st.markdown("**Après :**")
-        if nxt is not None:
-            block_session(nxt, headline="Prochaine", color="#4F7BFE")
-            start_dt = now_local.replace(hour=nxt["_tstart"].hour, minute=nxt["_tstart"].minute, second=0, microsecond=0)
-            st.caption(f"🗓 Dans **{td_to_hm(start_dt - now_local)}** (début {fmt_hhmm(nxt['_tstart'])}).")
-        else:
-            st.info("Aucune autre séance après celle en cours.")
-    elif state == "upcoming":
-        # prochaine séance à venir
-        block_session(nxt, headline="Prochaine", color="#4F7BFE")
-        start_dt = now_local.replace(hour=nxt["_tstart"].hour, minute=nxt["_tstart"].minute, second=0, microsecond=0)
-        st.caption(f"🗓 Dans **{td_to_hm(start_dt - now_local)}** (de {fmt_hhmm(nxt['_tstart'])} à {fmt_hhmm(nxt['_tend'])}).")
-        # Bonus: montre aussi la suivante après celle-là
-        rest = day_df[day_df["_tstart"] > nxt["_tstart"]]
-        if not rest.empty:
-            st.markdown("**Après :**")
-            nxt2 = rest.iloc[0]
-            block_session(nxt2, headline="Ensuite", color="#7c3aed")  # violet
-    else:  # completed
-        st.info(f"Toutes les séances de **{day_choice}** sont terminées.")
-
-# ============================ INTERFACE ===============================
-
-st.title("🗓️ Portail Génie Civil — EDT & Listes (S1)")
-
-edt, etu, idx = load_raw_s1()
-df_all_edt = edt.copy()  # EDT global S1 pour l'annuaire
-
-# ---- Index de détection (diagnostic complet) — masqué par défaut
-if SHOW_DIAGNOSTIC:
-    with st.expander("📂 Index des fichiers détectés (diagnostic)", expanded=False):
-        if idx.empty:
-            st.info("Aucun fichier détecté dans `data/raw/edt/` et `data/raw/students/`.")
-        else:
-            st.dataframe(
-                idx[["Type","Fichier","Lu","S1_par_nom","S1_par_col","Spec2","Niv2","Groupe","Erreur"]],
-                hide_index=True, use_container_width=True
-            )
-
-if edt.empty:
-    st.error("Aucun EDT S1 trouvé ou reconnu.")
-    st.stop()
-
-with st.sidebar:
-    st.subheader("🔎 Mode d’accès")
-    role = st.radio("Je suis :", ["Étudiant", "Enseignant"], horizontal=True)
-
-    st.markdown("---")
-    st.caption("Filtres hiérarchiques")
-
-    spec_order = ["RIB","VOA","STRUCTURE","LICENCE","INGENIEUR"]
-    available_specs = [s for s in spec_order if s in edt["Spec2"].dropna().unique().tolist() or s in etu["Spec2"].dropna().unique().tolist()]
-    spec = st.selectbox("Spécialité", available_specs, index=0 if available_specs else None)
-
-    raw_levels = list(level_options_for(spec))
-    level_labels = [pretty_level_label(spec, n) for n in raw_levels]
-    label_to_raw = dict(zip(level_labels, raw_levels))
-    niv_label = st.selectbox("Niveau", level_labels, index=0 if level_labels else None)
-    niv = label_to_raw.get(niv_label)
-
-    g_from_edt = subgroup_by_spec_level(edt, spec, niv)["Groupe"].dropna().map(normalize_groupe)
-    g_from_etu = subgroup_by_spec_level(etu, spec, niv)["Groupe"].dropna().map(normalize_groupe)
-    grp_pool = sorted(pd.concat([g_from_edt, g_from_etu]).unique().tolist())
-    groupe = st.selectbox("Groupe", grp_pool, index=0 if grp_pool else None)
-
-    st.markdown("---")
-    q_nom = st.text_input("Nom/Prénom (étudiant ou enseignant)")
-    st.caption("Astuce : tape un nom puis appuie sur Entrée ⏎")
-    print_mode = st.checkbox("🖨️ Mode impression")
-
-if print_mode:
-    st.markdown(
-        """
-        <style>
-            section[data-testid="stSidebar"] { display: none !important; }
-            .block-container { padding-top: 1rem; padding-bottom: 0; }
-            header { visibility: hidden; height: 0; }
-            @media print {
-                .stButton, .stDownloadButton, [data-testid="stFileUploader"] { display: none !important; }
-                .stDataFrame { border: none !important; }
-            }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-bloc = subgroup_by_spec_level(edt, spec, niv, groupe)
-now = datetime.now()
-title_clean = f"{spec} {pretty_level_label(spec, niv)}".strip()
-
-# ============================ VUE ÉTUDIANT ============================
-
-if role == "Étudiant":
-    header_role("Étudiant", f"{title_clean} • Groupe {groupe}")
-
-    tab_edt, tab_next = st.tabs(["📅 Mon EDT", "⏭️ Prochaine séance"])
-
-    with tab_edt:
-        st.markdown("#### Emploi du temps")
-        view = bloc[["Jour","Heure début","Heure fin","Matière","Type","Enseignant","Salle","Fréquence"]]
-        st.download_button(
-            "⬇️ Exporter l’EDT en Excel",
-            df_to_xlsx_bytes(view),
-            file_name=f"EDT_{spec}_{niv}_G{groupe}_S1.xlsx",
-            use_container_width=True,
-        )
-        st.dataframe(view.rename(columns={"Heure début":"Début","Heure fin":"Fin"}),
-                     use_container_width=True, hide_index=True)
-
-    with tab_next:
-        # Composant partagé (jour sélectionnable + bandeau coloré + enseignant)
-        render_next_sessions_shared(bloc, title="Prochaine séance (Étudiant)")
-# =========================== VUE ENSEIGNANT ===========================
-
-else:
-    header_role("Enseignant", f"{title_clean} • Groupe {groupe}")
-
-    tab_plan, tab_next, tab_annuaire, tab_presence = st.tabs(
-        ["🗂️ Planning", "⏭️ Prochaine séance", "📇 Annuaire enseignants", "📝 Feuille de présence"]
-    )
-
-    # ---------- Planning avec filtre par Salle ----------
-    with tab_plan:
-        st.markdown("#### Planning filtré")
-        planning = bloc.copy()
-        if not planning.empty:
-            # filtre nom enseignant libre (optionnel)
-            if q_nom:
-                C = get_cols(planning)
-                planning = planning[planning[C["ens"]].str.contains(q_nom, case=False, na=False)]
-
-            C = get_cols(planning)
-            salles_opts = ["Toutes"] + unique_rooms(planning)
-            sel_salle = st.selectbox("Filtrer par salle", salles_opts, index=0, key="filtre_salle_planning")
-            bloc_aff = planning.copy()
-            if sel_salle != "Toutes":
-                bloc_aff = bloc_aff[bloc_aff[C["sal"]].astype(str) == sel_salle]
-
-            # Ordonner visuellement
-            try:
-                day_index = {d:i for i,d in enumerate(WEEKDAY_FR)}
-                bloc_aff["_didx"] = bloc_aff[C["jour"]].astype(str).str.upper().map(day_index).fillna(7).astype(int)
-                bloc_aff["_tstart"] = bloc_aff[C["hdeb"]].astype(str).apply(lambda s: int(s.replace("h",":").replace(":","")[:4]))
-                bloc_aff = bloc_aff.sort_values(["_didx","_tstart"]).drop(columns=["_didx","_tstart"])
-            except Exception:
-                pass
-
-            plan_view = bloc_aff[[C["jour"],C["hdeb"],C["hfin"],C["mat"],C["typ"],C["sal"],C["grp"]]].rename(columns={
-                C["jour"]: "Jour", C["hdeb"]: "Début", C["hfin"]: "Fin", C["mat"]: "Matière", C["typ"]: "Type",
-                C["sal"]: "Salle", C["grp"]: "Groupe"
-            })
-
-            st.download_button(
-                "⬇️ Exporter le planning en Excel",
-                df_to_xlsx_bytes(plan_view),
-                file_name=f"Planning_{spec}_{niv}_G{groupe}_S1.xlsx",
-                use_container_width=True,
-            )
-            st.dataframe(plan_view, use_container_width=True, hide_index=True)
-        else:
-            st.info("Aucun cours pour ce filtre.")
-
-    # ---------- Prochaine séance (partagé) ----------
-    with tab_next:
-        render_next_sessions_shared(bloc, title="Prochaine séance (Enseignant)")
-
-    # ---------- Annuaire enseignants ----------
-    with tab_annuaire:
-        st.markdown("#### Annuaire des enseignants (hebdomadaire)")
-        if df_all_edt.empty:
-            st.info("Aucun EDT global S1 disponible.")
-        else:
-            q_t = st.text_input("Recherche par nom", key="search_teacher").strip()
-            teachers = unique_teachers(df_all_edt)
-            if q_t:
-                teachers = [t for t in teachers if q_t.lower() in t.lower()]
-
-            if not teachers:
-                st.info("Aucun enseignant trouvé pour ce filtre.")
-            else:
-                teach = st.selectbox("Sélectionnez un enseignant", ["— choisir —"] + teachers, index=0, key="sb_teacher_dir")
-                if teach and teach != "— choisir —":
-                    sub = week_schedule_for_teacher(df_all_edt, teach)
-                    if sub is None or sub.empty:
-                        st.warning("Aucun créneau pour cet enseignant.")
-                    else:
-                        C = get_cols(sub)
-                        salles = sorted(s for s in sub[C["sal"]].dropna().astype(str).unique() if s.strip())
-                        st.caption("Salles hebdomadaires : " + (" • ".join([f"`{s}`" for s in salles]) if salles else "—"))
-                        show = sub[[C["jour"], C["hdeb"], C["hfin"], C["mat"], C["typ"], C["sal"], C["grp"]]].rename(columns={
-                            C["jour"]: "Jour", C["hdeb"]: "Début", C["hfin"]: "Fin", C["mat"]: "Matière", C["typ"]: "Type",
-                            C["sal"]: "Salle", C["grp"]: "Groupe"
-                        })
-                        st.dataframe(show, use_container_width=True, hide_index=True)
-                else:
-                    st.write("### Liste des enseignants")
-                    cols = st.columns(3)
-                    for i, t in enumerate(teachers):
-                        cols[i % 3].write(f"- {t}")
-
-    # ---------- Feuille de présence (enseignant) ----------
-    with tab_presence:
-        st.markdown("#### Feuille de présence (enseignant)")
-
-        mobile_mode = st.toggle(
-            "📱 Mode mobile (affichage compact)", value=True,
-            help="Affiche par pages : Nom + Présent + Remarque (idéal sur smartphone)"
-        )
-
-        q_filter = st.text_input("🔎 Recherche rapide (Nom/Prénom) :", value="").strip()
-
-        etu_g_raw = subgroup_by_spec_level(etu, spec, niv, groupe).copy()
-
-        if "Matricule" in etu_g_raw.columns:
-            etu_g_raw = etu_g_raw.drop(columns=["Matricule"])
-
-        if "Nom" in etu_g_raw.columns or "Prenom" in etu_g_raw.columns:
-            etu_g_raw["Nom complet"] = (
-                etu_g_raw.get("Nom", "").astype(str).str.strip() + " " +
-                etu_g_raw.get("Prenom", "").astype(str).str.strip()
-            ).str.strip().replace("^\\s+$", "", regex=True)
-        else:
-            first_col = etu_g_raw.columns[0] if len(etu_g_raw.columns) else "Etudiant"
-            etu_g_raw["Nom complet"] = etu_g_raw[first_col].astype(str)
-
-        full_key = f"presence_full_{spec}_{niv}_{groupe}"
-        if full_key not in st.session_state:
-            base = etu_g_raw[["Nom complet"]].dropna().drop_duplicates().reset_index(drop=True)
-            base["Présent"] = False
-            base["Remarque"] = ""
-            st.session_state[full_key] = base
-
-        full_df = st.session_state[full_key]
-        incoming = etu_g_raw[["Nom complet"]].dropna().drop_duplicates().reset_index(drop=True)
-        full_df = incoming.merge(full_df, on="Nom complet", how="left")
-        full_df["Présent"] = full_df["Présent"].fillna(False)
-        full_df["Remarque"] = full_df["Remarque"].fillna("")
-        st.session_state[full_key] = full_df
-
-        if q_filter:
-            full_df = full_df[full_df["Nom complet"].str.contains(q_filter, case=False, na=False)]
-
-        page_key = f"presence_page_{spec}_{niv}_{groupe}"
-        if page_key not in st.session_state:
-            st.session_state[page_key] = 1
-        page = st.session_state[page_key]
-
-        page_size = st.select_slider(
-            "Taille de page", options=[8, 10, 12, 15, 20], value=12 if mobile_mode else 20,
-            help="Nombre d'étudiants affichés simultanément"
-        )
-        total = len(full_df)
-        max_page = max(1, (total + page_size - 1) // page_size)
-        page = min(page, max_page)
-
-        c1, c2, c3 = st.columns([1, 1, 4])
-        with c1:
-            if st.button("◀️ Précédent", disabled=(page <= 1), use_container_width=True):
-                page = max(1, page - 1)
-        with c2:
-            if st.button("Suivant ▶️", disabled=(page >= max_page), use_container_width=True):
-                page = min(max_page, page + 1)
-        with c3:
-            st.caption(f"Page {page} / {max_page} — {total} étudiants")
-
-        st.session_state[page_key] = page
-        start, end = (page - 1) * page_size, (page - 1) * page_size + page_size
-        page_df = full_df.iloc[start:end].copy()
-
-        colA, colB, colC = st.columns([1, 1, 3])
-        with colA:
-            if st.button("✔️ Tout cocher (page)", use_container_width=True):
-                page_df["Présent"] = True
-        with colB:
-            if st.button("✖️ Tout décocher (page)", use_container_width=True):
-                page_df["Présent"] = False
-        with colC:
-            st.caption("En mode mobile : Nom + case Présent + Remarque, sans défilement horizontal.")
-
-        col_cfg = {
-            "Nom complet": st.column_config.TextColumn("Étudiant", width="large", disabled=True),
-            "Présent": st.column_config.CheckboxColumn("Présent"),
-            "Remarque": st.column_config.TextColumn("Remarque", width="large"),
-        }
-
-        edited_page = st.data_editor(
-            page_df[["Nom complet", "Présent", "Remarque"]],
-            hide_index=True,
-            use_container_width=True,
-            height=480 if mobile_mode else 520,
-            num_rows="fixed",
-            column_config=col_cfg,
-            key=f"editor_presence_{spec}_{niv}_{groupe}_p{page}",
-        )
-
-        full_ref = st.session_state[full_key].set_index("Nom complet")
-        for _, row in edited_page.iterrows():
-            full_ref.loc[row["Nom complet"], "Présent"] = bool(row["Présent"])
-            full_ref.loc[row["Nom complet"], "Remarque"] = str(row["Remarque"] or "")
-        st.session_state[full_key] = full_ref.reset_index()
-
-        export_df = st.session_state[full_key].copy().sort_values("Nom complet").reset_index(drop=True)
-
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-        titre_pdf = f"Feuille de présence — {spec} {pretty_level_label(spec, niv)} • Groupe {groupe} (S1)"
-        meta_pdf  = f"Généré le {ts}"
-        header_pdf = {
-            "univ": "UNIVERSITÉ DE TLEMCEN",
-            "fac":  "FACULTÉ DE TECHNOLOGIE",
-            "dept": "DÉPARTEMENT DE GÉNIE CIVIL",
-            "spec": f"Spécialité : {spec} — Niveau : {pretty_level_label(spec, niv)}",
-            "grp":  f"Groupe : {groupe}",
-        }
-
-        pdf_bytes = make_presence_pdf(export_df, titre_pdf, meta_pdf, header=header_pdf)
         st.download_button(
             "📄 Exporter la présence en PDF",
-            data=pdf_bytes,
-            file_name=f"Presence_{spec}_{niv}_G{groupe}_S1_{datetime.now():%Y%m%d_%H%M}.pdf",
+            data=build_presence_pdf(),
+            file_name=f"Presence_{spec}_{level}_{group}_{now_dz().strftime('%Y%m%d_%H%M')}.pdf",
             mime="application/pdf",
-            use_container_width=True,
+            use_container_width=True
         )
+# streamlit_app.py  — PART 6/6
 
-# ----------------------------- FOOTER ---------------------------------
+def diagnostic_box():
+    with st.expander("Index des fichiers détectés (diagnostic)", expanded=False):
+        st.write("Niveaux disponibles par spécialité :")
+        specs, levels_by_spec, groups_by_spec_level = options_by_hierarchy()
+        st.write(levels_by_spec)
 
-st.divider()
-st.caption(
-    "S1 • Spécialité → Niveau → Groupe • Groupes normalisés (G11/G12) • "
-    "Harmonisation des listes étudiants • Exports EDT/Planning en Excel (.xlsx) • "
-    "Prochaine séance partagée (jour sélectionnable) • Annuaire enseignants • "
-    "Feuille de présence mobile + Remarque • Export PDF officiel (UABT)."
-)
+        st.write("Exemples de fichiers EDT :")
+        st.write(sorted(os.path.basename(x) for x in glob.glob(os.path.join(EDT_DIR,"*.xlsx"))))
+
+        st.write("Exemples de listes étudiants :")
+        st.write(sorted(os.path.basename(x) for x in glob.glob(os.path.join(STUD_DIR,"*.xlsx"))))
+
+def main():
+    # diagnostic masqué par défaut
+    diagnostic_box()
+
+    mode, spec, level, group, search_name = filter_area()
+    if not spec or not level or not group:
+        st.info("Choisis une combinaison Spécialité → Niveau → Groupe.")
+        return
+
+    if mode == "Étudiant":
+        render_student_ui(spec, level, group, search_name)
+    else:
+        render_teacher_ui(spec, level, group, search_name)
+
+if __name__ == "__main__":
+    main()
