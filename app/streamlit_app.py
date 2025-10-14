@@ -165,24 +165,32 @@ def norm_spec_from_filename(fname: str) -> Optional[str]:
 
 def norm_level_from_filename(fname: str) -> Optional[str]:
     s_raw = os.path.splitext(fname)[0].upper()
-    s = s_raw.replace("_", "").replace(" ", "")
+    compact = re.sub(r"[\s_\-]", "", s_raw)
     # Licence
-    if "L2" in s or "LICENCE2" in s:
+    if "L2" in compact or "LICENCE2" in compact:
         return "LICENCE 2"
-    if "L3" in s or "LICENCE3" in s:
+    if "L3" in compact or "LICENCE3" in compact:
         return "LICENCE 3"
     # Ingénieur
-    if "1ING" in s or "ING1" in s or "INGENIEUR1" in s:
+    if any(token in compact for token in ["1ING", "ING1", "INGENIEUR1"]):
         return "INGENIEUR 1"
-    if "2ING" in s or "ING2" in s or "INGENIEUR2" in s:
+    if any(token in compact for token in ["2ING", "ING2", "INGENIEUR2"]):
         return "INGENIEUR 2"
-    if "3ING" in s or "ING3" in s or "INGENIEUR3" in s:
+    if any(token in compact for token in ["3ING", "ING3", "INGENIEUR3"]):
         return "INGENIEUR 3"
-    # Masters
+    # Masters (M1/M2, MASTER1/MASTER2, M-1, etc.)
     token_str = re.sub(r"[_\-]", " ", s_raw)
-    if re.search(r"\bM1\b", token_str):
+    if (
+        re.search(r"\bM\s*[-_]?\s*1\b", token_str)
+        or "MASTER1" in compact
+        or re.search(r"M1(?![0-9])", compact)
+    ):
         return "M1"
-    if re.search(r"\bM2\b", token_str):
+    if (
+        re.search(r"\bM\s*[-_]?\s*2\b", token_str)
+        or "MASTER2" in compact
+        or re.search(r"M2(?![0-9])", compact)
+    ):
         return "M2"
     return None
 
@@ -310,13 +318,14 @@ def load_all_students() -> Dict[Tuple[str,str,str], pd.DataFrame]:
 
     def norm_level_from_value(val: str) -> Optional[str]:
         s = (val or "").strip().upper().replace(" ", "")
-        if s in {"L2","LICENCE2"}: return "LICENCE 2"
-        if s in {"L3","LICENCE3"}: return "LICENCE 3"
-        if s in {"1ING","ING1","INGENIEUR1","1INGENIEUR"}: return "INGENIEUR 1"
-        if s in {"2ING","ING2","INGENIEUR2","2INGENIEUR"}: return "INGENIEUR 2"
-        if s in {"3ING","ING3","INGENIEUR3","3INGENIEUR"}: return "INGENIEUR 3"
-        if s in {"M1"}: return "M1"
-        if s in {"M2"}: return "M2"
+        cleaned = re.sub(r"[\s_\-]", "", s)
+        if cleaned in {"L2","LICENCE2"}: return "LICENCE 2"
+        if cleaned in {"L3","LICENCE3"}: return "LICENCE 3"
+        if cleaned in {"1ING","ING1","INGENIEUR1","1INGENIEUR"}: return "INGENIEUR 1"
+        if cleaned in {"2ING","ING2","INGENIEUR2","2INGENIEUR"}: return "INGENIEUR 2"
+        if cleaned in {"3ING","ING3","INGENIEUR3","3INGENIEUR"}: return "INGENIEUR 3"
+        if cleaned in {"M1","MASTER1"}: return "M1"
+        if cleaned in {"M2","MASTER2"}: return "M2"
         return None
 
     def norm_group_from_value(val: str) -> Optional[str]:
@@ -419,8 +428,10 @@ def load_all_students() -> Dict[Tuple[str,str,str], pd.DataFrame]:
                 elif "3" in text and "ING" in text: level = "INGENIEUR 3"
                 elif "L2" in text: level = "LICENCE 2"
                 elif "L3" in text: level = "LICENCE 3"
-                elif "M1" in text: level = "M1"
-                elif "M2" in text: level = "M2"
+                elif re.search(r"M\s*[-_]?\s*1|MASTER\s*1", text):
+                    level = "M1"
+                elif re.search(r"M\s*[-_]?\s*2|MASTER\s*2", text):
+                    level = "M2"
             if not group:
                 text = df.get("Col_Groupe","").astype(str).str.upper().str.cat(sep=" ")
                 group = "G11" if "G11" in text else ("G12" if "G12" in text else None)
