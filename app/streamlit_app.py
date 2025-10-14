@@ -164,7 +164,8 @@ def norm_spec_from_filename(fname: str) -> Optional[str]:
 
 
 def norm_level_from_filename(fname: str) -> Optional[str]:
-    s = fname.upper().replace("_", "").replace(" ", "")
+    s_raw = os.path.splitext(fname)[0].upper()
+    s = s_raw.replace("_", "").replace(" ", "")
     # Licence
     if "L2" in s or "LICENCE2" in s:
         return "LICENCE 2"
@@ -178,9 +179,10 @@ def norm_level_from_filename(fname: str) -> Optional[str]:
     if "3ING" in s or "ING3" in s or "INGENIEUR3" in s:
         return "INGENIEUR 3"
     # Masters
-    if re.search(r"\bM1\b", s):
+    token_str = re.sub(r"[_\-]", " ", s_raw)
+    if re.search(r"\bM1\b", token_str):
         return "M1"
-    if re.search(r"\bM2\b", s):
+    if re.search(r"\bM2\b", token_str):
         return "M2"
     return None
 
@@ -366,14 +368,44 @@ def load_all_students() -> Dict[Tuple[str,str,str], pd.DataFrame]:
             group = norm_group_from_value(df["Col_Groupe"].dropna().astype(str).iloc[0])
 
         # 5) normalisation noms
-        if "NomComplet" in df.columns:
-            names = df["NomComplet"].astype(str)
+        base = df.copy()
+        base_cols = base.columns
+        n = base.get("Nom") if "Nom" in base_cols else None
+        p = base.get("Prénom") if "Prénom" in base_cols else None
+
+        if n is not None:
+            last_names = n.astype(str).fillna("").str.strip()
         else:
-            n = df.get("Nom","").astype(str)
-            p = df.get("Prénom","").astype(str)
-            names = (n.str.strip()+" "+p.str.strip()).str.strip()
-        names = names.replace({"nan":"", "nan nan":""}).str.strip()
-        names = names[names!=""]
+            last_names = pd.Series([""] * len(base), index=base.index, dtype="object")
+
+        if p is not None:
+            first_names = p.astype(str).fillna("").str.strip()
+        else:
+            first_names = pd.Series([""] * len(base), index=base.index, dtype="object")
+
+        full_names = None
+        if "NomComplet" in base_cols:
+            full_names = base["NomComplet"].astype(str).fillna("").str.strip()
+
+        if full_names is None or full_names.eq("").all():
+            full_names = (last_names.str.strip() + " " + first_names.str.strip()).str.strip()
+
+        # Si Nom/Prénom vides mais NomComplet renseigné → tenter un split simple
+        if last_names.eq("").all() and first_names.eq("").all():
+            split = full_names.str.split(r"\s+", n=1, expand=True)
+            if split.shape[1] >= 1:
+                last_names = split[0].fillna("").str.strip()
+            if split.shape[1] >= 2:
+                first_names = split[1].fillna("").str.strip()
+
+        last_names = last_names.replace({"nan": ""}).fillna("").str.strip()
+        first_names = first_names.replace({"nan": ""}).fillna("").str.strip()
+        full_names = full_names.replace({"nan": ""}).fillna("").str.strip()
+
+        mask_valid = (last_names != "") | (first_names != "") | (full_names != "")
+        last_names = last_names[mask_valid]
+        first_names = first_names[mask_valid]
+        full_names = full_names[mask_valid]
 
         # 6) derniers recours
         if not spec or not level or not group:
@@ -396,7 +428,11 @@ def load_all_students() -> Dict[Tuple[str,str,str], pd.DataFrame]:
         if not spec or not level or not group:
             continue
 
-        clean = pd.DataFrame({"Nom affiché": names.tolist()}).reset_index(drop=True)
+        clean = pd.DataFrame({
+            "Nom": last_names.tolist(),
+            "Prénom": first_names.tolist(),
+            "Nom complet": full_names.tolist(),
+        }).reset_index(drop=True)
         out[(spec, level, group)] = clean
 
     return out
@@ -621,23 +657,28 @@ def pdf_presence(spec: str, level: str, group: str, df_presence: pd.DataFrame) -
     c.setFont("Helvetica", 10)
     c.drawString(2 * cm, h - 5.1 * cm, f"Date / Heure : {dt}")
 
-    # Tableau simple : Nom | Présent | Remarque
+    # Tableau : Nom | Prénom | Présent | Remarque
     y = h - 6 * cm
     c.setFont("Helvetica-Bold", 10)
-    c.drawString(2 * cm, y, "Étudiant")
+    c.drawString(2 * cm, y, "Nom")
+    c.drawString(7 * cm, y, "Prénom")
     c.drawString(11 * cm, y, "Présent")
     c.drawString(14 * cm, y, "Remarque")
     y -= 0.6 * cm
     c.setFont("Helvetica", 10)
 
     for _, r in df_presence.iterrows():
-        nom = str(r["Nom"])
+        nom = str(r.get("Nom", "") or "")
+        prenom = str(r.get("Prénom", "") or "")
+        if not nom and not prenom:
+            nom = str(r.get("Nom complet", "") or "")
         present = "Oui" if r["Présent"] else "Non"
         rem = str(r.get("Remarque","") or "")
         if y < 2 * cm:
             c.showPage()
             y = h - 2 * cm
-        c.drawString(2 * cm, y, nom[:40])
+        c.drawString(2 * cm, y, nom[:30])
+        c.drawString(7 * cm, y, prenom[:30])
         c.drawString(11 * cm, y, present)
         c.drawString(14 * cm, y, rem[:35])
         y -= 0.5 * cm
@@ -655,32 +696,56 @@ def render_presence(spec: str, level: str, group: str, students_map: Dict[Tuple[
         st.warning("Aucune liste d'étudiants détectée pour ce groupe.")
         return
 
+    stud = stud.copy().reset_index(drop=True)
+    for col in ["Nom", "Prénom", "Nom complet"]:
+        if col in stud.columns:
+            stud[col] = stud[col].astype(str).replace({"nan": ""}).fillna("").str.strip()
+
+    if "Nom" not in stud.columns:
+        stud["Nom"] = ""
+    if "Prénom" not in stud.columns:
+        stud["Prénom"] = ""
+    if "Nom complet" not in stud.columns:
+        stud["Nom complet"] = (stud["Nom"].str.strip() + " " + stud["Prénom"].str.strip()).str.strip()
+
+    # assure une valeur d'affichage cohérente
+    stud["Nom complet"] = stud["Nom complet"].replace({"nan": ""}).fillna("").str.strip()
+    empty_full = stud["Nom complet"] == ""
+    stud.loc[empty_full, "Nom complet"] = (stud.loc[empty_full, "Nom"].str.strip() + " " + stud.loc[empty_full, "Prénom"].str.strip()).str.strip()
+
+    stud["__id"] = stud.index.map(lambda i: f"{spec}_{level}_{group}_{i}")
+
     # Mode mobile compact
     mobile = st.toggle("📱 Mode mobile (affichage compact)", value=True, help="Nom + case Présent (pas de défilement horizontal).")
 
     # Recherche rapide
     q = st.text_input("🔎 Recherche rapide (Nom/Prénom) :", "")
     show = stud.copy()
-    show.rename(columns={"Nom affiché": "Nom"}, inplace=True)
     if q.strip():
-        mask = show["Nom"].str.contains(q.strip(), case=False, na=False)
+        needle = q.strip()
+        mask = (
+            show["Nom"].str.contains(needle, case=False, na=False)
+            | show["Prénom"].str.contains(needle, case=False, na=False)
+            | show["Nom complet"].str.contains(needle, case=False, na=False)
+        )
         show = show[mask]
 
     # État session : cases + remarques
     key_state = f"presence_{spec}_{level}_{group}"
     if key_state not in st.session_state:
-        st.session_state[key_state] = {n: False for n in show["Nom"].tolist()}
+        st.session_state[key_state] = {row["__id"]: False for _, row in stud.iterrows()}
     key_rem = f"remark_{spec}_{level}_{group}"
     if key_rem not in st.session_state:
-        st.session_state[key_rem] = {n: "" for n in show["Nom"].tolist()}
+        st.session_state[key_rem] = {row["__id"]: "" for _, row in stud.iterrows()}
 
     # Flags pour rerun propre
     if "__needs_rerun__" not in st.session_state:
         st.session_state["__needs_rerun__"] = False
 
     def set_all(val: bool):
-        for n in show["Nom"].tolist():
-            st.session_state[key_state][n] = val
+        for ident in show["__id"].tolist():
+            st.session_state[key_state][ident] = val
+            st.session_state[(key_state, ident)] = val
         st.session_state["__needs_rerun__"] = True
 
     c1, c2 = st.columns(2)
@@ -698,40 +763,66 @@ def render_presence(spec: str, level: str, group: str, students_map: Dict[Tuple[
     if mobile:
         # Liste compacte (Nom + ✅)
         st.caption("En mode mobile : Nom + case Présent. Les remarques restent disponibles plus bas.")
-        for n in show["Nom"].tolist():
+        for _, row in show.iterrows():
+            ident = row["__id"]
+            nom = row["Nom"].strip()
+            prenom = row["Prénom"].strip()
+            display_name = (nom + " " + prenom).strip() or row["Nom complet"]
             colA, colB = st.columns([4, 1])
             with colA:
-                st.write(n)
+                st.write(display_name)
             with colB:
-                st.checkbox("Présent", key=(key_state, n), value=st.session_state[key_state][n],
-                            on_change=lambda name=n: st.session_state[key_state].update({name: st.session_state[(key_state, name)]}))
+                chk = st.checkbox(
+                    "Présent",
+                    key=(key_state, ident),
+                    value=st.session_state[key_state].get(ident, False),
+                )
+                st.session_state[key_state][ident] = st.session_state.get((key_state, ident), chk)
         with st.expander("✍️ Remarques (facultatif)", expanded=False):
-            for n in show["Nom"].tolist():
-                st.text_input(n, key=(key_rem, n), value=st.session_state[key_rem][n],
-                              on_change=lambda name=n: st.session_state[key_rem].update({name: st.session_state[(key_rem, name)]}))
+            for _, row in show.iterrows():
+                ident = row["__id"]
+                display_name = (row["Nom"].strip() + " " + row["Prénom"].strip()).strip() or row["Nom complet"]
+                txt = st.text_input(
+                    display_name or "Étudiant",
+                    key=(key_rem, ident),
+                    value=st.session_state[key_rem].get(ident, ""),
+                )
+                st.session_state[key_rem][ident] = st.session_state.get((key_rem, ident), txt)
     else:
         # Tableau avec présence + remarque
         grid = []
-        for n in show["Nom"].tolist():
-            present = st.session_state[key_state].get(n, False)
-            remark = st.session_state[key_rem].get(n, "")
+        for _, row in show.iterrows():
+            ident = row["__id"]
+            nom = row["Nom"].strip()
+            prenom = row["Prénom"].strip()
+            display_name = (nom + " " + prenom).strip() or row["Nom complet"]
+            present = st.session_state[key_state].get(ident, False)
+            remark = st.session_state[key_rem].get(ident, "")
             c1, c2, c3 = st.columns([4, 1, 3])
             with c1:
-                st.write(n)
+                st.write(display_name)
             with c2:
-                chk = st.checkbox("Présent", key=(key_state, n), value=present)
-                st.session_state[key_state][n] = chk
+                chk = st.checkbox("Présent", key=(key_state, ident), value=present)
+                st.session_state[key_state][ident] = st.session_state.get((key_state, ident), chk)
             with c3:
-                txt = st.text_input("Remarque", key=(key_rem, n), value=remark, label_visibility="collapsed")
-                st.session_state[key_rem][n] = txt
+                txt = st.text_input(
+                    "Remarque",
+                    key=(key_rem, ident),
+                    value=remark,
+                    label_visibility="collapsed",
+                )
+                st.session_state[key_rem][ident] = st.session_state.get((key_rem, ident), txt)
 
     # Construire DataFrame présence
     pres_rows = []
-    for n in show["Nom"].tolist():
+    for _, row in show.iterrows():
+        ident = row["__id"]
         pres_rows.append({
-            "Nom": n,
-            "Présent": bool(st.session_state[key_state].get(n, False)),
-            "Remarque": st.session_state[key_rem].get(n, ""),
+            "Nom": row["Nom"].strip(),
+            "Prénom": row["Prénom"].strip(),
+            "Nom complet": row["Nom complet"].strip(),
+            "Présent": bool(st.session_state[key_state].get(ident, False)),
+            "Remarque": st.session_state[key_rem].get(ident, ""),
         })
     df_presence = pd.DataFrame(pres_rows)
 
