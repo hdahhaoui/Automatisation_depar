@@ -728,16 +728,14 @@ def pdf_presence(spec: str, level: str, group: str, df_presence: pd.DataFrame) -
     c.setFont("Helvetica", 10)
     c.drawString(2 * cm, h - 5.1 * cm, f"Date / Heure : {dt}")
 
-    # Tableau : Nom | Prénom | Présent | Remarque
+    # Tableau : Nom | Présent | Remarque
     y = h - 6 * cm
     c.setFont("Helvetica-Bold", 10)
     x_nom = 2 * cm
-    x_prenom = 8.5 * cm
-    x_present = 14.5 * cm
-    x_remarque = 17 * cm
+    x_present = 12 * cm
+    x_remarque = 15 * cm
 
     c.drawString(x_nom, y, "Nom")
-    c.drawString(x_prenom, y, "Prénom")
     c.drawString(x_present, y, "Présent")
     c.drawString(x_remarque, y, "Remarque")
     y -= 0.6 * cm
@@ -745,22 +743,18 @@ def pdf_presence(spec: str, level: str, group: str, df_presence: pd.DataFrame) -
 
     for _, r in df_presence.iterrows():
         nom = str(r.get("Nom", "") or "").strip()
-        prenom = str(r.get("Prénom", "") or "").strip()
-        if not nom or not prenom:
+        if not nom:
             full = str(r.get("Nom complet", "") or "").strip()
             if full:
                 parts = full.split(None, 1)
-                if not nom and parts:
+                if parts:
                     nom = parts[0]
-                if not prenom and len(parts) > 1:
-                    prenom = parts[1]
         present = "Oui" if r["Présent"] else "Non"
         rem = str(r.get("Remarque","") or "")
         if y < 2 * cm:
             c.showPage()
             y = h - 2 * cm
         c.drawString(x_nom, y, nom[:18])
-        c.drawString(x_prenom, y, prenom[:18])
         c.drawString(x_present, y, present)
         c.drawString(x_remarque, y, rem[:28])
         y -= 0.5 * cm
@@ -852,13 +846,12 @@ def render_presence(spec: str, level: str, group: str, students_map: Dict[Tuple[
     mobile = st.toggle("📱 Mode mobile (affichage compact)", value=True, help="Nom + case Présent (pas de défilement horizontal).")
 
     # Recherche rapide
-    q = st.text_input("🔎 Recherche rapide (Nom/Prénom) :", "")
+    q = st.text_input("🔎 Recherche rapide (Nom) :", "")
     show = stud.copy()
     if q.strip():
         needle = q.strip()
         mask = (
             show["Nom"].str.contains(needle, case=False, na=False)
-            | show["Prénom"].str.contains(needle, case=False, na=False)
             | show["Nom complet"].str.contains(needle, case=False, na=False)
         )
         show = show[mask]
@@ -899,8 +892,7 @@ def render_presence(spec: str, level: str, group: str, students_map: Dict[Tuple[
         for _, row in show.iterrows():
             ident = row["__id"]
             nom = row["Nom"].strip()
-            prenom = row["Prénom"].strip()
-            display_name = (nom + " " + prenom).strip() or row["Nom complet"]
+            display_name = nom or row["Nom complet"]
             colA, colB = st.columns([4, 1])
             with colA:
                 st.write(display_name)
@@ -914,7 +906,7 @@ def render_presence(spec: str, level: str, group: str, students_map: Dict[Tuple[
         with st.expander("✍️ Remarques (facultatif)", expanded=False):
             for _, row in show.iterrows():
                 ident = row["__id"]
-                display_name = (row["Nom"].strip() + " " + row["Prénom"].strip()).strip() or row["Nom complet"]
+                display_name = row["Nom"].strip() or row["Nom complet"]
                 txt = st.text_input(
                     display_name or "Étudiant",
                     key=(key_rem, ident),
@@ -927,8 +919,7 @@ def render_presence(spec: str, level: str, group: str, students_map: Dict[Tuple[
         for _, row in show.iterrows():
             ident = row["__id"]
             nom = row["Nom"].strip()
-            prenom = row["Prénom"].strip()
-            display_name = (nom + " " + prenom).strip() or row["Nom complet"]
+            display_name = nom or row["Nom complet"]
             present = st.session_state[key_state].get(ident, False)
             remark = st.session_state[key_rem].get(ident, "")
             c1, c2, c3 = st.columns([4, 1, 3])
@@ -946,28 +937,24 @@ def render_presence(spec: str, level: str, group: str, students_map: Dict[Tuple[
                 )
                 st.session_state[key_rem][ident] = st.session_state.get((key_rem, ident), txt)
 
-    # Construire DataFrame présence (en veillant à disposer de Nom et Prénom)
-    def _names_for_row(row: pd.Series) -> Tuple[str, str, str]:
+    # Construire DataFrame présence (en veillant à disposer d'un Nom exploitable)
+    def _names_for_row(row: pd.Series) -> Tuple[str, str]:
         last = str(row.get("Nom", "") or "").strip()
-        first = str(row.get("Prénom", "") or "").strip()
         full = str(row.get("Nom complet", "") or "").strip()
-        if (not last or not first) and full:
+        if not last and full:
             parts = full.split(None, 1)
-            if not last and parts:
+            if parts:
                 last = parts[0].strip()
-            if not first and len(parts) > 1:
-                first = parts[1].strip()
         if not full:
-            full = (last + " " + first).strip()
-        return last, first, full
+            full = last
+        return last, full
 
     pres_rows = []
     for _, row in show.iterrows():
         ident = row["__id"]
-        last, first, full = _names_for_row(row)
+        last, full = _names_for_row(row)
         pres_rows.append({
             "Nom": last,
-            "Prénom": first,
             "Nom complet": full,
             "Présent": bool(st.session_state[key_state].get(ident, False)),
             "Remarque": st.session_state[key_rem].get(ident, ""),
