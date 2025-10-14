@@ -728,30 +728,29 @@ def pdf_presence(spec: str, level: str, group: str, df_presence: pd.DataFrame) -
     c.setFont("Helvetica", 10)
     c.drawString(2 * cm, h - 5.1 * cm, f"Date / Heure : {dt}")
 
-    # Tableau : Nom | Prénom | Présent | Remarque
+    # Tableau : Nom complet | Présent | Remarque
     y = h - 6 * cm
     c.setFont("Helvetica-Bold", 10)
-    c.drawString(2 * cm, y, "Nom")
-    c.drawString(7 * cm, y, "Prénom")
-    c.drawString(11 * cm, y, "Présent")
-    c.drawString(14 * cm, y, "Remarque")
+    c.drawString(2 * cm, y, "Nom complet")
+    c.drawString(12 * cm, y, "Présent")
+    c.drawString(15 * cm, y, "Remarque")
     y -= 0.6 * cm
     c.setFont("Helvetica", 10)
 
     for _, r in df_presence.iterrows():
         nom = str(r.get("Nom", "") or "")
         prenom = str(r.get("Prénom", "") or "")
-        if not nom and not prenom:
-            nom = str(r.get("Nom complet", "") or "")
+        full = str(r.get("Nom complet", "") or "").strip()
+        if not full:
+            full = (nom + " " + prenom).strip()
         present = "Oui" if r["Présent"] else "Non"
         rem = str(r.get("Remarque","") or "")
         if y < 2 * cm:
             c.showPage()
             y = h - 2 * cm
-        c.drawString(2 * cm, y, nom[:30])
-        c.drawString(7 * cm, y, prenom[:30])
-        c.drawString(11 * cm, y, present)
-        c.drawString(14 * cm, y, rem[:35])
+        c.drawString(2 * cm, y, full[:45])
+        c.drawString(12 * cm, y, present)
+        c.drawString(15 * cm, y, rem[:35])
         y -= 0.5 * cm
 
     c.showPage()
