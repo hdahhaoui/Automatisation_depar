@@ -33,7 +33,7 @@ st.set_page_config(
 
 # Contact département (Messenger)
 DEPT_FB_MESSENGER_URL = os.getenv(
-    "DEPT_FB_MESSENGER_URL", "https://m.me/DepartementGenieCivil"
+    "DEPT_FB_MESSENGER_URL", "https://www.messenger.com/t/225672610630305"
 )
 
 # Répertoires de données
