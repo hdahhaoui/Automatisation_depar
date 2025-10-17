@@ -31,6 +31,11 @@ st.set_page_config(
     layout="wide",
 )
 
+# Contact département (Messenger)
+DEPT_FB_MESSENGER_URL = os.getenv(
+    "DEPT_FB_MESSENGER_URL", "https://m.me/DepartementGenieCivil"
+)
+
 # Répertoires de données
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data", "raw")
@@ -139,6 +144,26 @@ def badge(label: str, color_bg: str = "#eaf2ff", color_fg: str = "#0842a0"):
         <span style="display:inline-block;padding:6px 10px;border-radius:999px;
                      background:{color_bg};color:{color_fg};font-weight:600;font-size:0.85rem;
                      margin-right:8px;">{label}</span>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_feedback_cta():
+    """Affiche dans la barre latérale un lien Messenger vers le département."""
+
+    st.sidebar.markdown(
+        f"""
+        <div style="padding:16px;border-radius:14px;background:#eef2ff;margin-bottom:1.5rem;">
+            <div style="font-weight:700;color:#1f4b99;margin-bottom:0.35rem;">Besoin d'aide&nbsp;?</div>
+            <p style="margin:0 0 0.85rem 0;font-size:0.85rem;color:#1f2933;">
+                Envoyez vos remarques ou problèmes directement au département via Messenger.
+            </p>
+            <a href="{DEPT_FB_MESSENGER_URL}" target="_blank" rel="noopener noreferrer"
+               style="display:block;text-decoration:none;background:#1877f2;color:#fff;font-weight:600;padding:10px 0;border-radius:999px;text-align:center;">
+                💬 Contacter le département
+            </a>
+        </div>
         """,
         unsafe_allow_html=True,
     )
@@ -1034,6 +1059,9 @@ def main():
         with st.expander("📍 Où trouver un enseignant ? — Vue hebdo du jour (spécialité/niveau)", expanded=True):
             render_where_is_teacher(edt_map, spec, level, group=None)
         st.session_state["show_where"] = False
+
+    st.sidebar.markdown("---")
+    render_feedback_cta()
 
     # Corps de page
     if mode == "Étudiant":
